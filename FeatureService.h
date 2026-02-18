@@ -74,9 +74,11 @@ namespace feat {
     class IFeatureLib {
     public:
         virtual ~IFeatureLib() {}
-        // Called once during start(). Returns false if init fails.
-        virtual bool init(const FeatureOptions& opts) = 0;
-        // Returns authorization keywords this lib exposes (called after init).
+        // Called on the caller's thread during start(). Returns a customized request
+        // callable that is enqueued as an internal task and executed on the worker thread.
+        // The callable returns true on success, false on failure.
+        virtual std::function<bool()> createInitRequest(const FeatureOptions& opts) = 0;
+        // Called (on the worker thread) after the init request completes successfully.
         virtual std::vector<std::string> getKeywords() const = 0;
     };
 
@@ -206,6 +208,7 @@ namespace feat {
     struct FeatureService::Task {
         FeatureTicket id;
         std::function<void(std::vector<uint8_t>&)> fn;
+        bool internal = false; // true: lib-init task; no result emitted, not tracked in tasks_
     };
 
 } // namespace feat

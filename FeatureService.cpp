@@ -41,30 +41,91 @@ namespace feat {
         }
 
         stop_flag_.store(false);
+        authKeywords_.clear();
+
+        // Ask each lib for its customized init request and wrap them in one internal task.
+        Task* initTask = new (std::nothrow) Task();
+        if (!initTask) {
+            state_.store(ServiceState::NotRunning);
+            return Status::Internal;
+        }
+        initTask->id       = 0;
+        initTask->internal = true;
+        initTask->fn = [this](std::vector<uint8_t>&) {
+            for (size_t i = 0; i < libs_.size(); ++i) {
+                if (stop_flag_.load()) { authKeywords_.clear(); return; }
+
+                std::function<bool()> req = libs_[i]->createInitRequest(opts_);
+                if (!req()) {
+                    // Lib's customized request failed: transition out of Initializing.
+                    ServiceState exp = ServiceState::Initializing;
+                    if (state_.compare_exchange_strong(exp, ServiceState::NotRunning)) {
+                        authKeywords_.clear();
+                        emitRunningEvent(false);  // notify: init failed
+                        stop_flag_.store(true);   // signal worker to exit
+                    }
+                    return;
+                }
+                std::vector<std::string> kw = libs_[i]->getKeywords();
+                for (size_t j = 0; j < kw.size(); ++j)
+                    authKeywords_.push_back(kw[j]);
+            }
+
+            if (stop_flag_.load()) { authKeywords_.clear(); return; }
+
+            // All requests succeeded: deduplicate and transition to Running.
+            std::sort(authKeywords_.begin(), authKeywords_.end());
+            authKeywords_.erase(std::unique(authKeywords_.begin(), authKeywords_.end()),
+                                authKeywords_.end());
+
+            ServiceState exp = ServiceState::Initializing;
+            if (!state_.compare_exchange_strong(exp, ServiceState::Running)) {
+                authKeywords_.clear(); // stop() already set NotRunning
+                return;
+            }
+            emitRunningEvent(true); // all libs ready — RUNNING
+        };
+
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            queue_.push_back(initTask);
+        }
 
         try {
             worker_ = std::thread(&FeatureService::workerLoop, this);
         }
         catch (...) {
+            std::lock_guard<std::mutex> lk(mtx_);
+            for (Task* qt : queue_) delete qt;
+            queue_.clear();
             state_.store(ServiceState::NotRunning);
             return Status::Internal;
         }
 
-        return Status::Ok; // worker will emit Running once all libs are ready
+        return Status::Ok; // worker will emit Running once all init requests complete
     }
 
     Status FeatureService::stop() {
-        // Accept stop from Running or Initializing; idempotent from NotRunning.
+        // Transition Running or Initializing → NotRunning; record whether we made the move.
+        // If state was already NotRunning (e.g. after an init-request failure), wasActive=false
+        // but we still join the worker because the thread may still be running.
         ServiceState old = state_.load();
+        bool wasActive = false;
         for (;;) {
-            if (old == ServiceState::NotRunning) return Status::Ok;
-            if (state_.compare_exchange_weak(old, ServiceState::NotRunning)) break;
+            if (old == ServiceState::NotRunning) break;
+            if (state_.compare_exchange_weak(old, ServiceState::NotRunning)) {
+                wasActive = true; break;
+            }
         }
 
         stop_flag_.store(true);
         cv_.notify_all();
 
+        // Always join: handles a worker that exited after an init-request failure
+        // but whose thread object is still joinable.
         if (worker_.joinable()) worker_.join();
+
+        if (!wasActive) return Status::Ok;
 
         // delete any pending tasks defensively
         {
@@ -146,77 +207,41 @@ namespace feat {
     }
 
     // ---------- worker (single thread) ----------
+    // Processes all tasks (internal and normal) from the queue.
+    // The first task is always the internal init task enqueued by start().
     void FeatureService::workerLoop() {
-        // Phase 1: initialize all lower libs and collect keywords.
-        authKeywords_.clear();
-        bool initOk = true;
-        for (size_t i = 0; i < libs_.size() && !stop_flag_.load(); ++i) {
-            if (!libs_[i]->init(opts_)) { initOk = false; break; }
-            std::vector<std::string> kw = libs_[i]->getKeywords();
-            for (size_t j = 0; j < kw.size(); ++j)
-                authKeywords_.push_back(kw[j]);
-        }
-
-        if (stop_flag_.load()) {
-            // stop() already set state to NotRunning and will emit NotRunning.
-            authKeywords_.clear();
-            return;
-        }
-
-        if (!initOk) {
-            state_.store(ServiceState::NotRunning);
-            authKeywords_.clear();
-            emitRunningEvent(false); // lib init failed
-            return;
-        }
-
-        // Deduplicate combined keyword list.
-        std::sort(authKeywords_.begin(), authKeywords_.end());
-        authKeywords_.erase(std::unique(authKeywords_.begin(), authKeywords_.end()),
-                            authKeywords_.end());
-
-        // Transition Initializing → Running; stop() may have raced us.
-        ServiceState exp = ServiceState::Initializing;
-        if (!state_.compare_exchange_strong(exp, ServiceState::Running)) {
-            // stop() set NotRunning first; it will emit NotRunning.
-            authKeywords_.clear();
-            return;
-        }
-
-        emitRunningEvent(true); // all libs ready — RUNNING
-
-        // Phase 2: process task queue.
         for (;;) {
             Task* t = nullptr;
             {
                 std::unique_lock<std::mutex> lk(mtx_);
                 cv_.wait(lk, [this] { return stop_flag_.load() || !queue_.empty(); });
-                if (stop_flag_.load() && queue_.empty()) {
-                    return; // exit worker
-                }
+                if (stop_flag_.load() && queue_.empty()) return;
                 t = queue_.front(); queue_.pop_front();
-                current_ = t;
+                if (!t->internal) current_ = t;
             }
 
             std::vector<uint8_t> out;
             try {
-                t->fn(out); // fn encodes success/cancel/empty in 'out'
+                t->fn(out);
             }
             catch (...) {
                 out.clear();
             }
 
-            // Emit the ONLY terminal result for running tasks
-            emitResult(t->id, out.empty() ? NULL : out.data(), out.size());
-
-            {
-                std::lock_guard<std::mutex> lk(mtx_);
-                if (current_ == t) current_ = nullptr;
-                tasks_.erase(t->id);
+            if (t->internal) {
+                // Init task: no result emitted; not tracked in tasks_.
+                // If it set stop_flag_, the next loop iteration will exit.
+                delete t;
+            } else {
+                // Normal task: emit the single terminal result.
+                emitResult(t->id, out.empty() ? NULL : out.data(), out.size());
+                {
+                    std::lock_guard<std::mutex> lk(mtx_);
+                    if (current_ == t) current_ = nullptr;
+                    tasks_.erase(t->id);
+                }
+                delete t;
             }
-
-            delete t;
-            t = nullptr;
         }
     }
 
