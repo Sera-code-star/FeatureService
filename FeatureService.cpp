@@ -36,46 +36,29 @@ namespace feat {
     // ---------- lifecycle ----------
     Status FeatureService::start() {
         ServiceState expected = ServiceState::NotRunning;
-        if (!state_.compare_exchange_strong(expected, ServiceState::Running)) {
-            return Status::Ok;
+        if (!state_.compare_exchange_strong(expected, ServiceState::Initializing)) {
+            return Status::Ok; // already Initializing or Running
         }
 
         stop_flag_.store(false);
-
-        // Init each lower lib with opts and collect its keywords.
-        authKeywords_.clear();
-        for (size_t i = 0; i < libs_.size(); ++i) {
-            if (!libs_[i]->init(opts_)) {
-                state_.store(ServiceState::NotRunning);
-                return Status::Internal;
-            }
-            std::vector<std::string> kw = libs_[i]->getKeywords();
-            for (size_t j = 0; j < kw.size(); ++j) {
-                authKeywords_.push_back(kw[j]);
-            }
-        }
-        // Deduplicate combined keyword list.
-        std::sort(authKeywords_.begin(), authKeywords_.end());
-        authKeywords_.erase(std::unique(authKeywords_.begin(), authKeywords_.end()),
-                            authKeywords_.end());
 
         try {
             worker_ = std::thread(&FeatureService::workerLoop, this);
         }
         catch (...) {
             state_.store(ServiceState::NotRunning);
-            authKeywords_.clear();
             return Status::Internal;
         }
 
-        emitRunningEvent(true); // READY
-        return Status::Ok;
+        return Status::Ok; // worker will emit Running once all libs are ready
     }
 
     Status FeatureService::stop() {
-        ServiceState expected = ServiceState::Running;
-        if (!state_.compare_exchange_strong(expected, ServiceState::NotRunning)) {
-            return Status::Ok;
+        // Accept stop from Running or Initializing; idempotent from NotRunning.
+        ServiceState old = state_.load();
+        for (;;) {
+            if (old == ServiceState::NotRunning) return Status::Ok;
+            if (state_.compare_exchange_weak(old, ServiceState::NotRunning)) break;
         }
 
         stop_flag_.store(true);
@@ -164,6 +147,45 @@ namespace feat {
 
     // ---------- worker (single thread) ----------
     void FeatureService::workerLoop() {
+        // Phase 1: initialize all lower libs and collect keywords.
+        authKeywords_.clear();
+        bool initOk = true;
+        for (size_t i = 0; i < libs_.size() && !stop_flag_.load(); ++i) {
+            if (!libs_[i]->init(opts_)) { initOk = false; break; }
+            std::vector<std::string> kw = libs_[i]->getKeywords();
+            for (size_t j = 0; j < kw.size(); ++j)
+                authKeywords_.push_back(kw[j]);
+        }
+
+        if (stop_flag_.load()) {
+            // stop() already set state to NotRunning and will emit NotRunning.
+            authKeywords_.clear();
+            return;
+        }
+
+        if (!initOk) {
+            state_.store(ServiceState::NotRunning);
+            authKeywords_.clear();
+            emitRunningEvent(false); // lib init failed
+            return;
+        }
+
+        // Deduplicate combined keyword list.
+        std::sort(authKeywords_.begin(), authKeywords_.end());
+        authKeywords_.erase(std::unique(authKeywords_.begin(), authKeywords_.end()),
+                            authKeywords_.end());
+
+        // Transition Initializing → Running; stop() may have raced us.
+        ServiceState exp = ServiceState::Initializing;
+        if (!state_.compare_exchange_strong(exp, ServiceState::Running)) {
+            // stop() set NotRunning first; it will emit NotRunning.
+            authKeywords_.clear();
+            return;
+        }
+
+        emitRunningEvent(true); // all libs ready — RUNNING
+
+        // Phase 2: process task queue.
         for (;;) {
             Task* t = nullptr;
             {

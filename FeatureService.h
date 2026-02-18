@@ -26,8 +26,9 @@ namespace feat {
     };
 
     enum class ServiceState : int {
-        NotRunning = 0,
-        Running = 1
+        NotRunning   = 0,
+        Initializing = 1,  // start() called; libs being inited in worker thread
+        Running      = 2
     };
 
     // ---------- Payload (no header) ----------
@@ -92,7 +93,8 @@ namespace feat {
     class FeatureService {
     public:
         // Contract:
-        //  - start(): init libs, collect keywords, create worker, notify "Running"
+        //  - start(): set Initializing, spawn worker thread; worker inits libs in background
+        //             and transitions to Running, emitting the "Running" callback when ready
         //  - stop():  stop accepting work, join worker, notify "NotRunning", clear keywords
         // libs and verifier are NOT owned by the service; caller manages their lifetime.
         explicit FeatureService(FeatureCallback cb = 0,
@@ -121,8 +123,9 @@ namespace feat {
         Status cancel(FeatureTicket ticket);
 
         // State snapshot
-        bool         isRunning() const { return state_.load() == ServiceState::Running; }
-        ServiceState state()     const { return state_.load(); }
+        bool         isRunning()      const { return state_.load() == ServiceState::Running; }
+        bool         isInitializing() const { return state_.load() == ServiceState::Initializing; }
+        ServiceState state()          const { return state_.load(); }
 
         // Payload management
         void   releasePayload(FeaturePayload* payload) { DeletePayload(payload); }
