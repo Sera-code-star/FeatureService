@@ -75,8 +75,7 @@ namespace feat {
     }
 
     // ---------- submit ----------
-    FeatureTicket FeatureService::submit(const std::function<void(std::vector<uint8_t>& out)>& fn,
-        const std::function<void()>& nativeCancel)
+    FeatureTicket FeatureService::submit(const std::function<void(std::vector<uint8_t>& out)>& fn)
     {
         if (!fn) return 0;
         if (state_.load() != ServiceState::Running) return 0;
@@ -86,7 +85,6 @@ namespace feat {
 
         t->id = next_ticket_.fetch_add(1);
         t->fn = fn;
-        t->nativeCancel = nativeCancel;
 
         {
             std::lock_guard<std::mutex> lk(mtx_);
@@ -100,11 +98,10 @@ namespace feat {
 
     // ---------- cancel(ticket) ----------
     // Pending -> remove {queue,tasks}, delete t, EMIT empty result now.
-    // Running -> DO NOT EMIT. Only call nativeCancel (best-effort). Worker will emit later from fn(out).
+    // Running -> DO NOT EMIT. Native cancel is handled by lower libs. Worker will emit later from fn(out).
     // Done/unknown -> NotFound.
     Status FeatureService::cancel(FeatureTicket ticket) {
         Task* t = nullptr;
-        std::function<void()> nativeHook;
         bool emitEmpty = false;
 
         {
@@ -125,20 +122,11 @@ namespace feat {
 
             if (!emitEmpty) {
                 // Running? (current_ == t)
-                if (current_ == it->second) {
-                    nativeHook = it->second->nativeCancel; // call outside lock
-                }
-                else {
+                if (current_ != it->second) {
                     // Not in queue and not current_: likely already finished
                     return Status::NotFound;
                 }
             }
-        }
-
-        // Call native cancel outside lock (best-effort).
-        if (nativeHook) {
-            try { nativeHook(); }
-            catch (...) {}
         }
 
         // Emit terminal "done" (empty) only for pending cancels.
