@@ -68,15 +68,38 @@ namespace feat {
     // ---------- Class-scoped deleter type ----------
     typedef void(*FeaturePayloadDeleter)(FeaturePayload* payload);
 
+    // ---------- Lower-lib interface ----------
+    // Each lower-level library implements this. The service does NOT own instances.
+    class IFeatureLib {
+    public:
+        virtual ~IFeatureLib() {}
+        // Called once during start(). Returns false if init fails.
+        virtual bool init(const FeatureOptions& opts) = 0;
+        // Returns authorization keywords this lib exposes (called after init).
+        virtual std::vector<std::string> getKeywords() const = 0;
+    };
+
+    // ---------- Authorization verifier interface ----------
+    // A single verifier is held by the service. It does NOT own the instance.
+    class IFeatureVerifier {
+    public:
+        virtual ~IFeatureVerifier() {}
+        // Returns true if the combined keyword set permits a submit().
+        virtual bool isAuthorized(const std::vector<std::string>& keywords) const = 0;
+    };
+
     // ---------- FeatureService ----------
     class FeatureService {
     public:
         // Contract:
-        //  - start(): create worker and immediately notify "Running" (service ready)
-        //  - stop():  stop accepting work, join worker, then notify "NotRunning" (stopped)
+        //  - start(): init libs, collect keywords, create worker, notify "Running"
+        //  - stop():  stop accepting work, join worker, notify "NotRunning", clear keywords
+        // libs and verifier are NOT owned by the service; caller manages their lifetime.
         explicit FeatureService(FeatureCallback cb = 0,
             void* user = 0,
-            const FeatureOptions& opts = FeatureOptions());
+            const FeatureOptions& opts = FeatureOptions(),
+            const std::vector<IFeatureLib*>& libs = std::vector<IFeatureLib*>(),
+            IFeatureVerifier* verifier = 0);
         ~FeatureService();
 
         FeatureService(const FeatureService&) = delete;
@@ -149,6 +172,15 @@ namespace feat {
 
         // options
         const FeatureOptions opts_;
+
+        // lower-lib instances (not owned); initialized during start()
+        std::vector<IFeatureLib*> libs_;
+
+        // authorization verifier (not owned); consulted in submit()
+        IFeatureVerifier* verifier_;
+
+        // combined keywords collected from all libs after start()
+        std::vector<std::string> authKeywords_;
 
         // single worker & tasks
         std::thread                           worker_;

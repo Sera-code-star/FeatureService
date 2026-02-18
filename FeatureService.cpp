@@ -1,4 +1,5 @@
 #include "FeatureService.h"
+#include <algorithm>
 #include <cerrno>
 #include <climits>
 #include <cfloat>
@@ -11,11 +12,14 @@ namespace feat {
     std::unordered_map<std::string, FeaturePayloadDeleter> FeatureService::s_deleters_;
 
     // ---------- ctor / dtor ----------
-    FeatureService::FeatureService(FeatureCallback cb, void* user, const FeatureOptions& opts)
+    FeatureService::FeatureService(FeatureCallback cb, void* user, const FeatureOptions& opts,
+        const std::vector<IFeatureLib*>& libs, IFeatureVerifier* verifier)
         : cb_(cb)
         , cb_user_(user)
         , state_(ServiceState::NotRunning)
         , opts_(opts)
+        , libs_(libs)
+        , verifier_(verifier)
         , next_ticket_(1)
         , stop_flag_(false)
         , current_(nullptr)
@@ -38,11 +42,29 @@ namespace feat {
 
         stop_flag_.store(false);
 
+        // Init each lower lib with opts and collect its keywords.
+        authKeywords_.clear();
+        for (size_t i = 0; i < libs_.size(); ++i) {
+            if (!libs_[i]->init(opts_)) {
+                state_.store(ServiceState::NotRunning);
+                return Status::Internal;
+            }
+            std::vector<std::string> kw = libs_[i]->getKeywords();
+            for (size_t j = 0; j < kw.size(); ++j) {
+                authKeywords_.push_back(kw[j]);
+            }
+        }
+        // Deduplicate combined keyword list.
+        std::sort(authKeywords_.begin(), authKeywords_.end());
+        authKeywords_.erase(std::unique(authKeywords_.begin(), authKeywords_.end()),
+                            authKeywords_.end());
+
         try {
             worker_ = std::thread(&FeatureService::workerLoop, this);
         }
         catch (...) {
             state_.store(ServiceState::NotRunning);
+            authKeywords_.clear();
             return Status::Internal;
         }
 
@@ -70,6 +92,8 @@ namespace feat {
             current_ = nullptr;
         }
 
+        authKeywords_.clear();
+
         emitRunningEvent(false); // STOPPED
         return Status::Ok;
     }
@@ -79,6 +103,7 @@ namespace feat {
     {
         if (!fn) return 0;
         if (state_.load() != ServiceState::Running) return 0;
+        if (verifier_ && !verifier_->isAuthorized(authKeywords_)) return 0;
 
         Task* t = new (std::nothrow) Task();
         if (!t) return 0;
