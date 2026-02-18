@@ -88,14 +88,12 @@ namespace feat {
 
         // Submit (always cancellable):
         // - fn(out) must fill 'out' with result bytes (may be empty).
-        // - nativeCancel (optional): lower/native cancel hook invoked on cancel while running.
         // Returns a non-zero ticket on success; 0 on failure (e.g., not Running).
-        FeatureTicket submit(const std::function<void(std::vector<uint8_t>& out)>& fn,
-            const std::function<void()>& nativeCancel = std::function<void()>());
+        FeatureTicket submit(const std::function<void(std::vector<uint8_t>& out)>& fn);
 
         // Cancel a specific task by ticket (best-effort).
         // - Pending: removed from queue; immediately emits FEATRES1 with empty data for that ticket.
-        // - Running: calls nativeCancel (if provided); DOES NOT EMIT. Worker will emit the single terminal result from fn(out).
+        // - Running: native cancel handled by lower libs; DOES NOT EMIT. Worker will emit the single terminal result from fn(out).
         // - Unknown/completed: NotFound
         Status cancel(FeatureTicket ticket);
 
@@ -173,7 +171,6 @@ namespace feat {
     struct FeatureService::Task {
         FeatureTicket id;
         std::function<void(std::vector<uint8_t>&)> fn;
-        std::function<void()> nativeCancel; // optional hook to cancel lower/native impl
     };
 
 } // namespace feat
