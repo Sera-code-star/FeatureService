@@ -136,11 +136,17 @@ namespace feat {
                 FeatureHandlerDel free_input,
                 FeatureHandlerDel free_output);
 
-        // Build a heap FeatureInput* for the given tag and actual_input*.
-        // free_input is copied from the on() registration for this tag.
+        // Step 1 — build the actual typed input struct on the heap.
+        // Makes a malloc'd copy of data[0..size); returns it as void*.
+        // Free with std::free() directly if not passed to makeInputEvt().
+        static void* makeFeatureInput(const void* data, size_t size);
+
+        // Step 2 — wrap the typed input in a submit-ready envelope.
+        // Looks up free_input from the on() registration for tag and embeds it
+        // so deleteFeatureInput() can chain-free featureInput + the wrapper.
         // Returns null if tag is not registered or on allocation failure.
-        // Cast the return value to void* and pass to submit().
-        void* makeFeatureInput(const char* tag, void* data);
+        // Pass the result to submit(); call deleteFeatureInput() if submit() returns 0.
+        void* makeInputEvt(const char* tag, void* featureInput);
 
         // Submit a task.
         // input must be a FeatureInput* (from makeFeatureInput()) cast to void*.

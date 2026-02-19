@@ -54,9 +54,22 @@ namespace feat {
     }
 
     // ---------- makeFeatureInput ----------
-    // Looks up free_input from the on() registration for tag, then heap-allocates
-    // a FeatureInput* wrapping (tag, data, free_input).
-    void* FeatureService::makeFeatureInput(const char* tag, void* data) {
+    // Allocates a malloc'd copy of data[0..size). The caller passes this to
+    // makeInputEvt() as the featureInput argument, or frees it with std::free().
+    void* FeatureService::makeFeatureInput(const void* data, size_t size) {
+        if (!data || size == 0) return nullptr;
+        void* p = std::malloc(size);
+        if (!p) return nullptr;
+        std::memcpy(p, data, size);
+        return p;
+    }
+
+    // ---------- makeInputEvt ----------
+    // Wraps an already-built featureInput* (from makeFeatureInput or caller-allocated)
+    // together with tag and the registered free_input into a FeatureInput envelope
+    // suitable for submit(). The registered free_input is embedded so that
+    // deleteFeatureInput() can chain-free featureInput then the envelope.
+    void* FeatureService::makeInputEvt(const char* tag, void* featureInput) {
         if (!tag) return nullptr;
 
         FeatureHandlerDel free_data = nullptr;
@@ -70,7 +83,7 @@ namespace feat {
         FeatureInput* fi = static_cast<FeatureInput*>(std::malloc(sizeof(FeatureInput)));
         if (!fi) return nullptr;
         fi->tag       = tag;
-        fi->data      = data;
+        fi->data      = featureInput;
         fi->free_data = free_data;
         return static_cast<void*>(fi);
     }
