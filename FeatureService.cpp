@@ -116,6 +116,13 @@ namespace feat {
         if (t && status == Status::Ok)
             out_data = t->fn(t->input->data);  // actual_input* -> actual_output*
 
+        // Option A: if the lib aborted early via exitFlag, override status and discard
+        // any partial output so the client sees the same shape as a queued cancel.
+        if (t && t->exitFlag.load()) {
+            status   = Status::Cancelled;
+            out_data = nullptr;
+        }
+
         FeatureOutput* out = new FeatureOutput();
         out->tag    = out_tag;
         out->status = status;
@@ -304,9 +311,12 @@ namespace feat {
                 }
             }
 
-            // Not in queue: currently running; can't interrupt it
-            if (!found && current_ != it->second)
-                return Status::NotFound;
+            // Not in queue: currently running — signal it to abort cooperatively.
+            if (!found) {
+                if (current_ != it->second) return Status::NotFound;
+                current_->exitFlag.store(1);  // lib polls this; dispatch() fires Cancelled cb
+                // tasks_ entry left intact; workerLoop erases it after dispatch() returns.
+            }
         }
 
         if (found) {
@@ -330,7 +340,16 @@ namespace feat {
             }
 
             FeatureTicket id = t->id;
+            if (!t->internal)
+                for (size_t i = 0; i < libs_.size(); ++i)
+                    libs_[i]->inject(&t->exitFlag);
+
             dispatch(t, nullptr, Status::Ok);
+
+            if (!t->internal)
+                for (size_t i = 0; i < libs_.size(); ++i)
+                    libs_[i]->inject(nullptr);   // release pointer before Task is deleted
+
             {
                 std::lock_guard<std::mutex> lk(mtx_);
                 if (current_ == t) current_ = nullptr;

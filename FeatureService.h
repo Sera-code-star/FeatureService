@@ -97,6 +97,10 @@ namespace feat {
         virtual ~IFeatureLib() {}
         virtual bool init(const FeatureOptions& opts) = 0;
         virtual std::vector<std::string> getKeywords() const = 0;
+        // Called by the service just before a task starts.  The lib polls *flag
+        // during processing and aborts early if it reads non-zero.
+        // Called again with nullptr after the task completes to clear the reference.
+        virtual void inject(std::atomic<char>* flag) = 0;
     };
 
     // ---------- Authorization verifier interface ----------
@@ -168,8 +172,9 @@ namespace feat {
         FeatureTicket submit(void* input);
 
         // Cancel a pending task.
-        // If the task is still queued: fires the callback with status=Cancelled.
-        // If the task is currently running: returns Ok but does not interrupt it.
+        // If the task is still queued:   removes it and fires callback with status=Cancelled.
+        // If the task is currently running: sets its exitFlag so the lib can abort early;
+        //   the Cancelled callback is fired by the worker when fn() returns.
         Status cancel(FeatureTicket ticket);
 
         // State snapshot
@@ -240,7 +245,8 @@ namespace feat {
         // Internal tasks: fn = lambda wrapping startup logic;
         //                 called as fn(nullptr), return value ignored.
         std::function<void*(void*)> fn;
-        bool internal = false;
+        bool              internal = false;
+        std::atomic<char> exitFlag { 0 };  // cooperative-cancel signal; &exitFlag injected into libs
     };
 
 } // namespace feat
