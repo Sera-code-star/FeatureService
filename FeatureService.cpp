@@ -43,7 +43,8 @@ namespace feat {
         stop_flag_.store(false);
         authKeywords_.clear();
 
-        // Ask each lib for its customized init request and wrap them in one internal task.
+        // Wrap the full lib init procedure in one internal task:
+        //   Phase 1 — verify libs  |  Phase 2 — init all libs  |  Phase 3 — emit cb
         Task* initTask = new (std::nothrow) Task();
         if (!initTask) {
             state_.store(ServiceState::NotRunning);
@@ -52,17 +53,27 @@ namespace feat {
         initTask->id       = 0;
         initTask->internal = true;
         initTask->fn = [this](std::vector<uint8_t>&) {
+            // ---- Phase 1: verify libs (null guard before touching any lib) ----
+            for (size_t i = 0; i < libs_.size(); ++i) {
+                if (!libs_[i]) {
+                    ServiceState exp = ServiceState::Initializing;
+                    if (state_.compare_exchange_strong(exp, ServiceState::NotRunning)) {
+                        emitRunningEvent(false); // null lib — cannot proceed
+                        stop_flag_.store(true);
+                    }
+                    return;
+                }
+            }
+
+            // ---- Phase 2: init all libs, collect keywords ----
             for (size_t i = 0; i < libs_.size(); ++i) {
                 if (stop_flag_.load()) { authKeywords_.clear(); return; }
-
-                std::function<bool()> req = libs_[i]->createInitRequest(opts_);
-                if (!req()) {
-                    // Lib's customized request failed: transition out of Initializing.
+                if (!libs_[i]->init(opts_)) {
                     ServiceState exp = ServiceState::Initializing;
                     if (state_.compare_exchange_strong(exp, ServiceState::NotRunning)) {
                         authKeywords_.clear();
-                        emitRunningEvent(false);  // notify: init failed
-                        stop_flag_.store(true);   // signal worker to exit
+                        emitRunningEvent(false); // lib init failed
+                        stop_flag_.store(true);
                     }
                     return;
                 }
@@ -73,11 +84,11 @@ namespace feat {
 
             if (stop_flag_.load()) { authKeywords_.clear(); return; }
 
-            // All requests succeeded: deduplicate and transition to Running.
             std::sort(authKeywords_.begin(), authKeywords_.end());
             authKeywords_.erase(std::unique(authKeywords_.begin(), authKeywords_.end()),
                                 authKeywords_.end());
 
+            // ---- Phase 3: emit callback — Running or NotRunning ----
             ServiceState exp = ServiceState::Initializing;
             if (!state_.compare_exchange_strong(exp, ServiceState::Running)) {
                 authKeywords_.clear(); // stop() already set NotRunning
@@ -102,7 +113,7 @@ namespace feat {
             return Status::Internal;
         }
 
-        return Status::Ok; // worker will emit Running once all init requests complete
+        return Status::Ok; // worker will emit Running once the init task completes
     }
 
     Status FeatureService::stop() {

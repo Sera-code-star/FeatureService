@@ -74,11 +74,9 @@ namespace feat {
     class IFeatureLib {
     public:
         virtual ~IFeatureLib() {}
-        // Called on the caller's thread during start(). Returns a customized request
-        // callable that is enqueued as an internal task and executed on the worker thread.
-        // The callable returns true on success, false on failure.
-        virtual std::function<bool()> createInitRequest(const FeatureOptions& opts) = 0;
-        // Called (on the worker thread) after the init request completes successfully.
+        // Called on the worker thread during the init task. Returns false if init fails.
+        virtual bool init(const FeatureOptions& opts) = 0;
+        // Called after init() returns true to collect the keywords this lib exposes.
         virtual std::vector<std::string> getKeywords() const = 0;
     };
 
