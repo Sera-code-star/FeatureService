@@ -144,7 +144,7 @@ namespace feat {
             current_ = nullptr;
         }
         authKeywords_.clear();
-        emitRunningEvent(false); // STOPPED
+        if (!joinable) emitRunningEvent(false); // STOPPED (skipped when caller blocks and handles it)
         return Status::Ok;
     }
 
