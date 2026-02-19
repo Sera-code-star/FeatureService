@@ -101,23 +101,44 @@ namespace feat {
         else     deleteFeatureOutput(static_cast<void*>(out));
     }
 
+    // ---------- deleteTagInput / deleteTagOutput ----------
+    // Universal deleters: search dispatch_table_ by tag and invoke the stored
+    // free_input / free_output function.  No-op when tag is absent or data is null.
+    void FeatureService::deleteTagInput(const char* tag, void* data) {
+        if (!data || !tag) return;
+        auto it = dispatch_table_.find(tag);
+        if (it != dispatch_table_.end() && it->second.free_input)
+            it->second.free_input(data);
+    }
+
+    void FeatureService::deleteTagOutput(const char* tag, void* data) {
+        if (!data || !tag) return;
+        auto it = dispatch_table_.find(tag);
+        if (it != dispatch_table_.end() && it->second.free_output)
+            it->second.free_output(data);
+    }
+
     // ---------- dispatchTask ----------
     // biz_func and raw_input were resolved at submit() time and live in the Task.
     // If status==Ok:        calls t->biz_func(t->raw_input) -> actual_output*.
     // If status==Cancelled: skips biz_func, out_data stays null.
-    // Either way: frees t->raw_input via t->free_input, builds FeatureOutput, fires cb_.
+    // Either way: frees t->raw_input via deleteTagInput, builds FeatureOutput, fires cb_.
     // Does NOT delete t; caller owns t.
     void FeatureService::dispatchTask(Task* t, Status status) {
-        void*             out_data = nullptr;
-        FeatureHandlerDel free_out = nullptr;
+        void* out_data = nullptr;
 
-        if (status == Status::Ok) {
+        if (status == Status::Ok)
             out_data = t->biz_func(t->raw_input);   // actual_input* -> actual_output*
-            free_out = t->free_output;
-        }
 
-        // Free raw_input now that biz_func has run (or was skipped for cancel)
-        if (t->free_input && t->raw_input) t->free_input(t->raw_input);
+        // Free raw_input via the universal deleter (searches dispatch_table_ by tag)
+        deleteTagInput(t->tag, t->raw_input);
+
+        // Look up free_output for the caller's FeatureOutput
+        FeatureHandlerDel free_out = nullptr;
+        {
+            auto it = dispatch_table_.find(t->tag);
+            if (it != dispatch_table_.end()) free_out = it->second.free_output;
+        }
 
         FeatureOutput* out = new FeatureOutput();
         out->tag       = t->tag;
@@ -231,8 +252,8 @@ namespace feat {
         {
             std::lock_guard<std::mutex> lk(mtx_);
             for (Task* t : queue_) {
-                if (!t->internal && t->free_input && t->raw_input)
-                    t->free_input(t->raw_input);
+                if (!t->internal)
+                    deleteTagInput(t->tag, t->raw_input);  // universal delete by tag
                 delete t;
             }
             queue_.clear();
@@ -265,22 +286,22 @@ namespace feat {
         Task* t = new (std::nothrow) Task();
         if (!t) return 0;
 
-        t->id          = next_ticket_.fetch_add(1);
-        t->tag         = fi->tag;
-        t->raw_input   = fi->data;                   // actual_input*; task now owns it
-        t->biz_func    = it->second.biz_func;
-        t->free_input  = it->second.free_input;
-        t->free_output = it->second.free_output;
-        t->internal    = false;
+        t->id        = next_ticket_.fetch_add(1);
+        t->tag       = fi->tag;
+        t->raw_input = fi->data;           // actual_input*; task now owns it
+        t->biz_func  = it->second.biz_func;
+        // free_input / free_output are NOT stored in Task; the service resolves
+        // them at use-time via deleteTagInput / deleteTagOutput (dispatch_table_).
+        t->internal  = false;
 
         // Consume the FeatureInput envelope (data ownership transferred to task above).
-        fi->free_data = nullptr;     // prevent deleteFeatureInput from freeing data
-        std::free(fi);               // free the envelope only
+        fi->free_data = nullptr;           // prevent deleteFeatureInput from freeing data
+        std::free(fi);                     // free the envelope only
 
         {
             std::lock_guard<std::mutex> lk(mtx_);
             if (stop_flag_.load()) {
-                if (t->free_input && t->raw_input) t->free_input(t->raw_input);
+                deleteTagInput(t->tag, t->raw_input);  // universal delete by tag
                 delete t;
                 return 0;
             }

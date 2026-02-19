@@ -183,6 +183,11 @@ namespace feat {
         // Does NOT delete t; caller is responsible for that.
         void dispatchTask(Task* t, Status status);
 
+        // Universal tag-based deleters: look up free_input / free_output in
+        // dispatch_table_ and call it.  No-op if tag is absent or data is null.
+        void deleteTagInput (const char* tag, void* data);
+        void deleteTagOutput(const char* tag, void* data);
+
         // Parsing helpers
         static bool       parseBool(const std::string& s, bool* ok);
         static int        parseInt(const std::string& s, bool* ok);
@@ -226,12 +231,12 @@ namespace feat {
 
     struct FeatureService::Task {
         FeatureTicket     id;
-        // User tasks (internal == false): biz_func + raw input extracted at submit() time.
-        const char*       tag;
-        void*             raw_input;    // actual_input*; owned by this task until dispatched
+        // User tasks (internal == false): resolved at submit() time.
+        const char*       tag;          // key for dispatch_table_ lookups
+        void*             raw_input;    // actual_input*; owned until dispatched
         FeatureHandlerFn  biz_func;     // looked up in dispatch_table_ by submit()
-        FeatureHandlerDel free_input;   // frees raw_input after biz_func returns (or on cancel)
-        FeatureHandlerDel free_output;  // embedded in FeatureOutput for the caller
+        // Deleters are NOT stored here; the service looks them up by tag via
+        // deleteTagInput / deleteTagOutput (dispatch_table_ is the authoritative map).
         // Internal tasks (internal == true): lifecycle work (e.g. lib init)
         std::function<void(std::vector<uint8_t>&)> fn;
         bool internal = false;
