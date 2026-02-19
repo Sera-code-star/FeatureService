@@ -1,4 +1,4 @@
-﻿#ifndef FEATURE_SERVICE_H
+#ifndef FEATURE_SERVICE_H
 #define FEATURE_SERVICE_H
 
 #include <cstdint>
@@ -27,118 +27,87 @@ namespace feat {
 
     enum class ServiceState : int {
         NotRunning   = 0,
-        Initializing = 1,  // start() called; libs being inited in worker thread
+        Initializing = 1,
         Running      = 2
     };
 
-    // ---------- Payload (no header) ----------
-    struct FeaturePayload {
-        char  tag[8];  // 8-byte ASCII tag (e.g., "FEATRUN1")
-        void* data;    // tag-specific pointer; freed by tag-specific deleter
+    // ---------- Ticket ----------
+    typedef std::uint64_t FeatureTicket;
+
+    // ---------- Event ----------
+    // Self-describing event packet delivered to every handler registered for its tag.
+    // `info` is a heap allocation owned by the event; freed by `free_info` after all
+    // handlers return. Handlers must not hold the `info` pointer beyond their call.
+    struct FeatureEvent {
+        const char*   tag;              // static string literal; one of TAG_* below
+        FeatureTicket ticket;           // 0 for service-level events
+        void*         info;             // tag-specific heap data; null if none
+        void        (*free_info)(void*);// how to free `info`; null iff info is null
     };
 
-    // ---------- Lifecycle payload ----------
-    enum class FeatureRunningState : std::uint8_t {
-        NotRunning = 0,
-        Running = 1
+    // ---------- Tags ----------
+    static const char* const TAG_START  = "start";   // service → Running
+    static const char* const TAG_STOP   = "stop";    // service → NotRunning
+    static const char* const TAG_CANCEL = "cancel";  // pending task cancelled (no data)
+    static const char* const TAG_RESULT = "result";  // task completed; info = FeatureResultInfo*
+
+    // ---------- Result info (carried by TAG_RESULT events) ----------
+    struct FeatureResultInfo {
+        void*  data;  // malloc'd result buffer; null if empty
+        size_t size;  // 0 if empty
     };
 
-    struct FeatureRunningData {
-        FeatureRunningState state;
-    };
+    // ---------- Handler ----------
+    typedef std::function<void(const FeatureEvent&)> FeatureHandler;
 
-    // ---------- Result payload ----------
-    typedef std::uint64_t FeatureTicket;  // ticket/ID for submitted tasks
-
-    struct FeatureResultData {
-        FeatureTicket ticket;
-        void* data; // malloc'ed buffer (may be NULL for empty)
-        size_t        size; // 0 for empty
-    };
-
-    // ---------- Tags (exactly 8 bytes) ----------
-    static const char TAG_FEAT_RUNNING_V1[8] = { 'F','E','A','T','R','U','N','1' };
-    static const char TAG_FEAT_RESULT_V1[8] = { 'F','E','A','T','R','E','S','1' };
-
-    // ---------- Callback ----------
-    typedef void(*FeatureCallback)(void* user, FeaturePayload* payload);
-
-    // ---------- Init Options (C++11: string->string) ----------
+    // ---------- Init Options ----------
     typedef std::unordered_map<std::string, std::string> FeatureOptions;
-
-    // ---------- Class-scoped deleter type ----------
-    typedef void(*FeaturePayloadDeleter)(FeaturePayload* payload);
 
     // ---------- Lower-lib interface ----------
     // Each lower-level library implements this. The service does NOT own instances.
     class IFeatureLib {
     public:
         virtual ~IFeatureLib() {}
-        // Called on the worker thread during the init task. Returns false if init fails.
         virtual bool init(const FeatureOptions& opts) = 0;
-        // Called after init() returns true to collect the keywords this lib exposes.
         virtual std::vector<std::string> getKeywords() const = 0;
     };
 
     // ---------- Authorization verifier interface ----------
-    // A single verifier is held by the service. It does NOT own the instance.
     class IFeatureVerifier {
     public:
         virtual ~IFeatureVerifier() {}
-        // Returns true if the combined keyword set permits a submit().
         virtual bool isAuthorized(const std::vector<std::string>& keywords) const = 0;
     };
 
     // ---------- FeatureService ----------
     class FeatureService {
     public:
-        // Contract:
-        //  - start(): set Initializing, spawn worker thread; worker inits libs in background
-        //             and transitions to Running, emitting the "Running" callback when ready
-        //  - stop():  stop accepting work, join worker, notify "NotRunning", clear keywords
-        // libs and verifier are NOT owned by the service; caller manages their lifetime.
-        explicit FeatureService(FeatureCallback cb = 0,
-            void* user = 0,
-            const FeatureOptions& opts = FeatureOptions(),
-            const std::vector<IFeatureLib*>& libs = std::vector<IFeatureLib*>(),
-            IFeatureVerifier* verifier = 0);
+        explicit FeatureService(const FeatureOptions& opts     = FeatureOptions(),
+                                const std::vector<IFeatureLib*>& libs = std::vector<IFeatureLib*>(),
+                                IFeatureVerifier* verifier     = 0);
         ~FeatureService();
 
         FeatureService(const FeatureService&) = delete;
         FeatureService& operator=(const FeatureService&) = delete;
 
         // Lifecycle
-        //   start()         — async: spawns worker; Running callback fires when ready.
-        //   stop()          — async: signals worker, drains queue, fires NotRunning callback;
-        //                     worker may still be finishing its current task on return.
-        //   stop(true)      — same but blocks until the worker thread exits.
-        //                     Pass true (or let the destructor do it) before re-starting
-        //                     or destroying the service.
         Status start();
-        Status stop(bool joinable = false);
+        Status stop(bool join = false);
 
-        // Submit (always cancellable):
-        // - fn(out) must fill 'out' with result bytes (may be empty).
-        // Returns a non-zero ticket on success; 0 on failure (e.g., not Running).
+        // Submit
         FeatureTicket submit(const std::function<void(std::vector<uint8_t>& out)>& fn);
 
-        // Cancel a specific task by ticket (best-effort).
-        // - Pending: removed from queue; immediately emits FEATRES1 with empty data for that ticket.
-        // - Running: native cancel handled by lower libs; DOES NOT EMIT. Worker will emit the single terminal result from fn(out).
-        // - Unknown/completed: NotFound
+        // Cancel
         Status cancel(FeatureTicket ticket);
+
+        // Subscribe a handler to events with the given tag. Thread-safe.
+        // Call before start() to guarantee delivery of TAG_START.
+        void on(const char* tag, FeatureHandler handler);
 
         // State snapshot
         bool         isRunning()      const { return state_.load() == ServiceState::Running; }
         bool         isInitializing() const { return state_.load() == ServiceState::Initializing; }
         ServiceState state()          const { return state_.load(); }
-
-        // Payload management
-        void   releasePayload(FeaturePayload* payload) { DeletePayload(payload); }
-
-        // ---------- Class-scoped (static) deleter registry ----------
-        static Status RegisterPayloadDeleter(const char tag8[8], FeaturePayloadDeleter d);
-        static void   DeletePayload(FeaturePayload* payload);
 
         // Options accessors
         bool        hasOption(const std::string& key) const;
@@ -150,67 +119,44 @@ namespace feat {
         double      getDoubleOr(const std::string& key, double fallback) const;
 
     private:
-        // Unified emit — overloaded on event data; builds and delivers the payload.
-        void emit(bool running);                                          // lifecycle event
-        void emit(FeatureTicket ticket, const void* data, size_t size);  // task-result event
+        // Look up handlers for `tag`, call each with the event, then free info.
+        void dispatch(const char* tag, FeatureTicket ticket,
+                      void* info, void(*free_info)(void*));
 
-        // Built-in deleters
-        static void DefaultFree(FeaturePayload* payload); // for FEATRUN1
-        static void ResultFree(FeaturePayload* payload);  // for FEATRES1
-
-        // Parsing helpers (C++11)
+        // Parsing helpers
         static bool       parseBool(const std::string& s, bool* ok);
         static int        parseInt(const std::string& s, bool* ok);
         static long long  parseLongLong(const std::string& s, bool* ok);
         static double     parseDouble(const std::string& s, bool* ok);
 
-        // Thread worker
         struct Task;
         void workerLoop();
 
-
     private:
-        // callback
-        FeatureCallback cb_;
-        void* cb_user_;
+        // handler registry: tag → ordered list of subscribers
+        std::unordered_map<std::string, std::vector<FeatureHandler>> handlers_;
+        std::mutex handlers_mtx_;
 
-        // lifecycle state
-        std::atomic<ServiceState> state_;
+        std::atomic<ServiceState>                state_;
+        const FeatureOptions                     opts_;
+        std::vector<IFeatureLib*>                libs_;
+        IFeatureVerifier*                        verifier_;
+        std::vector<std::string>                 authKeywords_;
 
-        // options
-        const FeatureOptions opts_;
-
-        // lower-lib instances (not owned); initialized during start()
-        std::vector<IFeatureLib*> libs_;
-
-        // authorization verifier (not owned); consulted in submit()
-        IFeatureVerifier* verifier_;
-
-        // combined keywords collected from all libs after start()
-        std::vector<std::string> authKeywords_;
-
-        // single worker & tasks
-        std::thread                           worker_;
-        std::deque<Task*>                     queue_;
+        std::thread                              worker_;
+        std::deque<Task*>                        queue_;
         std::unordered_map<FeatureTicket, Task*> tasks_;
-        std::atomic<FeatureTicket>            next_ticket_;
-        mutable std::mutex                    mtx_;
-        std::condition_variable               cv_;
-        std::atomic<bool>                     stop_flag_;
-
-        // Current running task (only one)
-        Task* current_;
-
-        // ---------- static deleter registry (class-scoped) ----------
-        static std::mutex                                          s_deleter_mtx_;
-        static std::unordered_map<std::string, FeaturePayloadDeleter> s_deleters_;
+        std::atomic<FeatureTicket>               next_ticket_;
+        mutable std::mutex                       mtx_;
+        std::condition_variable                  cv_;
+        std::atomic<bool>                        stop_flag_;
+        Task*                                    current_;
     };
 
-    // ---- Internal Task ----
     struct FeatureService::Task {
         FeatureTicket id;
         std::function<void(std::vector<uint8_t>&)> fn;
-        bool internal = false; // true: lib-init task; no result emitted, not tracked in tasks_
+        bool internal = false;
     };
 
 } // namespace feat

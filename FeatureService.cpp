@@ -7,44 +7,62 @@
 
 namespace feat {
 
-    // ---------- static members ----------
-    std::mutex FeatureService::s_deleter_mtx_;
-    std::unordered_map<std::string, FeaturePayloadDeleter> FeatureService::s_deleters_;
-
     // ---------- ctor / dtor ----------
-    FeatureService::FeatureService(FeatureCallback cb, void* user, const FeatureOptions& opts,
-        const std::vector<IFeatureLib*>& libs, IFeatureVerifier* verifier)
-        : cb_(cb)
-        , cb_user_(user)
-        , state_(ServiceState::NotRunning)
+    FeatureService::FeatureService(const FeatureOptions& opts,
+                                   const std::vector<IFeatureLib*>& libs,
+                                   IFeatureVerifier* verifier)
+        : state_(ServiceState::NotRunning)
         , opts_(opts)
         , libs_(libs)
         , verifier_(verifier)
         , next_ticket_(1)
         , stop_flag_(false)
         , current_(nullptr)
-    {
-        // Ensure built-in deleters are present (idempotent)
-        RegisterPayloadDeleter(TAG_FEAT_RUNNING_V1, &FeatureService::DefaultFree);
-        RegisterPayloadDeleter(TAG_FEAT_RESULT_V1, &FeatureService::ResultFree);
-    }
+    {}
 
     FeatureService::~FeatureService() {
-        stop(true); // must join before members are destroyed
+        stop(true);
     }
 
-    // ---------- lifecycle ----------
+    // ---------- on ----------
+    void FeatureService::on(const char* tag, FeatureHandler handler) {
+        if (!tag || !handler) return;
+        std::lock_guard<std::mutex> lk(handlers_mtx_);
+        handlers_[tag].push_back(std::move(handler));
+    }
+
+    // ---------- dispatch ----------
+    // Snapshots the handler list under the lock so handlers may safely call on()
+    // or stop() without deadlocking. Frees info after all handlers return.
+    void FeatureService::dispatch(const char* tag, FeatureTicket ticket,
+                                  void* info, void(*free_info)(void*)) {
+        std::vector<FeatureHandler> fns;
+        {
+            std::lock_guard<std::mutex> lk(handlers_mtx_);
+            auto it = handlers_.find(tag);
+            if (it != handlers_.end()) fns = it->second;
+        }
+
+        FeatureEvent ev;
+        ev.tag       = tag;
+        ev.ticket    = ticket;
+        ev.info      = info;
+        ev.free_info = free_info;
+
+        for (size_t i = 0; i < fns.size(); ++i) fns[i](ev);
+
+        if (free_info && info) free_info(info);
+    }
+
+    // ---------- start ----------
     Status FeatureService::start() {
         ServiceState expected = ServiceState::NotRunning;
-        if (!state_.compare_exchange_strong(expected, ServiceState::Initializing)) {
+        if (!state_.compare_exchange_strong(expected, ServiceState::Initializing))
             return Status::Ok; // already Initializing or Running
-        }
 
         stop_flag_.store(false);
         authKeywords_.clear();
 
-        // Wrap the full lib init procedure in one internal task:
-        //   Phase 1 — verify libs  |  Phase 2 — init all libs  |  Phase 3 — emit cb
         Task* initTask = new (std::nothrow) Task();
         if (!initTask) {
             state_.store(ServiceState::NotRunning);
@@ -53,33 +71,32 @@ namespace feat {
         initTask->id       = 0;
         initTask->internal = true;
         initTask->fn = [this](std::vector<uint8_t>&) {
-            // ---- Phase 1: verify libs (null guard before touching any lib) ----
+            // Phase 1: null-guard all libs
             for (size_t i = 0; i < libs_.size(); ++i) {
                 if (!libs_[i]) {
                     ServiceState exp = ServiceState::Initializing;
                     if (state_.compare_exchange_strong(exp, ServiceState::NotRunning)) {
-                        emit(false); // null lib — cannot proceed
+                        dispatch(TAG_STOP, 0, nullptr, nullptr);
                         stop_flag_.store(true);
                     }
                     return;
                 }
             }
 
-            // ---- Phase 2: init all libs, collect keywords ----
+            // Phase 2: init all libs, collect keywords
             for (size_t i = 0; i < libs_.size(); ++i) {
                 if (stop_flag_.load()) { authKeywords_.clear(); return; }
                 if (!libs_[i]->init(opts_)) {
                     ServiceState exp = ServiceState::Initializing;
                     if (state_.compare_exchange_strong(exp, ServiceState::NotRunning)) {
                         authKeywords_.clear();
-                        emit(false); // lib init failed
+                        dispatch(TAG_STOP, 0, nullptr, nullptr);
                         stop_flag_.store(true);
                     }
                     return;
                 }
                 std::vector<std::string> kw = libs_[i]->getKeywords();
-                for (size_t j = 0; j < kw.size(); ++j)
-                    authKeywords_.push_back(kw[j]);
+                for (size_t j = 0; j < kw.size(); ++j) authKeywords_.push_back(kw[j]);
             }
 
             if (stop_flag_.load()) { authKeywords_.clear(); return; }
@@ -88,13 +105,13 @@ namespace feat {
             authKeywords_.erase(std::unique(authKeywords_.begin(), authKeywords_.end()),
                                 authKeywords_.end());
 
-            // ---- Phase 3: emit callback — Running or NotRunning ----
+            // Phase 3: transition to Running
             ServiceState exp = ServiceState::Initializing;
             if (!state_.compare_exchange_strong(exp, ServiceState::Running)) {
-                authKeywords_.clear(); // stop() already set NotRunning
+                authKeywords_.clear();
                 return;
             }
-            emit(true); // all libs ready — RUNNING
+            dispatch(TAG_START, 0, nullptr, nullptr);
         };
 
         {
@@ -113,12 +130,11 @@ namespace feat {
             return Status::Internal;
         }
 
-        return Status::Ok; // worker will emit Running once the init task completes
+        return Status::Ok;
     }
 
     // ---------- stop ----------
-    Status FeatureService::stop(bool joinable) {
-        // CAS loop: transition Running or Initializing → NotRunning.
+    Status FeatureService::stop(bool join) {
         ServiceState old = state_.load();
         bool wasActive = false;
         for (;;) {
@@ -131,11 +147,10 @@ namespace feat {
         stop_flag_.store(true);
         cv_.notify_all();
 
-        if (joinable && worker_.joinable()) worker_.join();
+        if (join && worker_.joinable()) worker_.join();
 
         if (!wasActive) return Status::Ok;
 
-        // Drain queue, reset tracking, emit NotRunning callback.
         {
             std::lock_guard<std::mutex> lk(mtx_);
             for (Task* t : queue_) delete t;
@@ -144,13 +159,13 @@ namespace feat {
             current_ = nullptr;
         }
         authKeywords_.clear();
-        if (!joinable) emit(false); // STOPPED (skipped when caller blocks and handles it)
+
+        if (!join) dispatch(TAG_STOP, 0, nullptr, nullptr);
         return Status::Ok;
     }
 
     // ---------- submit ----------
-    FeatureTicket FeatureService::submit(const std::function<void(std::vector<uint8_t>& out)>& fn)
-    {
+    FeatureTicket FeatureService::submit(const std::function<void(std::vector<uint8_t>& out)>& fn) {
         if (!fn) return 0;
         if (state_.load() != ServiceState::Running) return 0;
         if (verifier_ && !verifier_->isAuthorized(authKeywords_)) return 0;
@@ -171,50 +186,37 @@ namespace feat {
         return t->id;
     }
 
-    // ---------- cancel(ticket) ----------
-    // Pending -> remove {queue,tasks}, delete t, EMIT empty result now.
-    // Running -> DO NOT EMIT. Native cancel is handled by lower libs. Worker will emit later from fn(out).
-    // Done/unknown -> NotFound.
+    // ---------- cancel ----------
     Status FeatureService::cancel(FeatureTicket ticket) {
-        Task* t = nullptr;
-        bool emitEmpty = false;
+        bool pendingCancelled = false;
 
         {
             std::lock_guard<std::mutex> lk(mtx_);
             auto it = tasks_.find(ticket);
             if (it == tasks_.end()) return Status::NotFound;
-            t = it->second;
 
-            // Pending? (present in queue_)
             for (std::deque<Task*>::iterator qit = queue_.begin(); qit != queue_.end(); ++qit) {
                 if ((*qit)->id == ticket) {
                     queue_.erase(qit);
                     tasks_.erase(ticket);
-                    emitEmpty = true;
+                    pendingCancelled = true;
                     break;
                 }
             }
 
-            if (!emitEmpty) {
-                // Running? (current_ == t)
-                if (current_ != it->second) {
-                    // Not in queue and not current_: likely already finished
-                    return Status::NotFound;
-                }
-            }
+            if (!pendingCancelled && current_ != it->second)
+                return Status::NotFound;
         }
 
-        // Emit terminal "done" (empty) only for pending cancels.
-        if (emitEmpty) {
-            emit(ticket, NULL, 0);
-        }
+        // Pending-cancel: notify with TAG_CANCEL (no info payload).
+        // Running-cancel: handled by lower libs; worker will dispatch TAG_RESULT when done.
+        if (pendingCancelled)
+            dispatch(TAG_CANCEL, ticket, nullptr, nullptr);
 
         return Status::Ok;
     }
 
-    // ---------- worker (single thread) ----------
-    // Processes all tasks (internal and normal) from the queue.
-    // The first task is always the internal init task enqueued by start().
+    // ---------- workerLoop ----------
     void FeatureService::workerLoop() {
         for (;;) {
             Task* t = nullptr;
@@ -227,20 +229,35 @@ namespace feat {
             }
 
             std::vector<uint8_t> out;
-            try {
-                t->fn(out);
-            }
-            catch (...) {
-                out.clear();
-            }
+            try { t->fn(out); } catch (...) { out.clear(); }
 
             if (t->internal) {
-                // Init task: no result emitted; not tracked in tasks_.
-                // If it set stop_flag_, the next loop iteration will exit.
                 delete t;
             } else {
-                // Normal task: emit the single terminal result.
-                emit(t->id, out.empty() ? NULL : out.data(), out.size());
+                // Build FeatureResultInfo and dispatch TAG_RESULT.
+                FeatureResultInfo* ri = static_cast<FeatureResultInfo*>(
+                    std::malloc(sizeof(FeatureResultInfo)));
+                if (ri) {
+                    if (!out.empty()) {
+                        void* buf = std::malloc(out.size());
+                        if (buf) { std::memcpy(buf, out.data(), out.size()); ri->data = buf; ri->size = out.size(); }
+                        else     { ri->data = nullptr; ri->size = 0; }
+                    } else {
+                        ri->data = nullptr; ri->size = 0;
+                    }
+                }
+
+                void(*free_ri)(void*) = nullptr;
+                if (ri) {
+                    free_ri = [](void* p) {
+                        FeatureResultInfo* r = static_cast<FeatureResultInfo*>(p);
+                        if (r->data) std::free(r->data);
+                        std::free(r);
+                    };
+                }
+
+                dispatch(TAG_RESULT, t->id, ri, free_ri);
+
                 {
                     std::lock_guard<std::mutex> lk(mtx_);
                     if (current_ == t) current_ = nullptr;
@@ -249,85 +266,6 @@ namespace feat {
                 delete t;
             }
         }
-    }
-
-    // ---------- emit (unified) ----------
-    // Lifecycle variant: builds a FEATRUN1 payload and fires the callback.
-    void FeatureService::emit(bool running) {
-        if (!cb_) return;
-
-        FeaturePayload* p = static_cast<FeaturePayload*>(std::malloc(sizeof(FeaturePayload)));
-        if (!p) return;
-        FeatureRunningData* d = static_cast<FeatureRunningData*>(std::malloc(sizeof(FeatureRunningData)));
-        if (!d) { std::free(p); return; }
-
-        std::memcpy(p->tag, TAG_FEAT_RUNNING_V1, 8);
-        d->state = running ? FeatureRunningState::Running : FeatureRunningState::NotRunning;
-        p->data  = d;
-        cb_(cb_user_, p);
-    }
-
-    // Task-result variant: builds a FEATRES1 payload and fires the callback.
-    void FeatureService::emit(FeatureTicket ticket, const void* data_ptr, size_t size) {
-        if (!cb_) return;
-
-        FeaturePayload* p = static_cast<FeaturePayload*>(std::malloc(sizeof(FeaturePayload)));
-        if (!p) return;
-        FeatureResultData* d = static_cast<FeatureResultData*>(std::malloc(sizeof(FeatureResultData)));
-        if (!d) { std::free(p); return; }
-
-        std::memcpy(p->tag, TAG_FEAT_RESULT_V1, 8);
-        d->ticket = ticket;
-        if (data_ptr && size) {
-            void* buf = std::malloc(size);
-            if (!buf) { d->data = NULL; d->size = 0; }
-            else      { std::memcpy(buf, data_ptr, size); d->data = buf; d->size = size; }
-        } else {
-            d->data = NULL; d->size = 0;
-        }
-        p->data = d;
-        cb_(cb_user_, p);
-    }
-
-    // ---------- class-scoped static deleters ----------
-    void FeatureService::DefaultFree(FeaturePayload* payload) {
-        if (!payload) return;
-        if (payload->data) {
-            std::free(payload->data);
-            payload->data = 0;
-        }
-        std::free(payload);
-    }
-
-    void FeatureService::ResultFree(FeaturePayload* payload) {
-        if (!payload) return;
-        if (payload->data) {
-            FeatureResultData* d = static_cast<FeatureResultData*>(payload->data);
-            if (d->data) std::free(d->data);
-            std::free(d);
-        }
-        std::free(payload);
-    }
-
-    Status FeatureService::RegisterPayloadDeleter(const char tag8[8], FeaturePayloadDeleter d) {
-        if (!tag8 || !d) return Status::Invalid;
-        std::lock_guard<std::mutex> lk(s_deleter_mtx_);
-        s_deleters_[std::string(tag8, tag8 + 8)] = d;
-        return Status::Ok;
-    }
-
-    void FeatureService::DeletePayload(FeaturePayload* payload) {
-        if (!payload) return;
-
-        FeaturePayloadDeleter fn = nullptr;
-        {
-            std::lock_guard<std::mutex> lk(s_deleter_mtx_);
-            std::string key(payload->tag, payload->tag + 8);
-            std::unordered_map<std::string, FeaturePayloadDeleter>::iterator it = s_deleters_.find(key);
-            if (it != s_deleters_.end()) fn = it->second;
-        }
-        if (fn) { fn(payload); return; }
-        DefaultFree(payload);
     }
 
     // ---------- options ----------
@@ -345,7 +283,6 @@ namespace feat {
         return it->second;
     }
 
-    // Parsers (C++11-friendly)
     bool FeatureService::parseBool(const std::string& s, bool* ok) {
         std::string t; t.reserve(s.size());
         for (size_t i = 0; i < s.size(); ++i) { char c = s[i]; if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a'); t.push_back(c); }
@@ -353,33 +290,25 @@ namespace feat {
         if (t == "0" || t == "false" || t == "no" || t == "n") { if (ok)*ok = true; return false; }
         if (ok)*ok = false; return false;
     }
-    int        FeatureService::parseInt(const std::string& s, bool* ok) { char* e = 0; errno = 0; long v = strtol(s.c_str(), &e, 10); if (e == s.c_str() || *e != '\0' || errno == ERANGE || v<INT_MIN || v>INT_MAX) { if (ok)*ok = false; return 0; } if (ok)*ok = true; return (int)v; }
-    long long  FeatureService::parseLongLong(const std::string& s, bool* ok) { char* e = 0; errno = 0; long long v = strtoll(s.c_str(), &e, 10); if (e == s.c_str() || *e != '\0' || errno == ERANGE) { if (ok)*ok = false; return 0; } if (ok)*ok = true; return v; }
-    double     FeatureService::parseDouble(const std::string& s, bool* ok) { char* e = 0; errno = 0; double v = strtod(s.c_str(), &e); if (e == s.c_str() || *e != '\0' || errno == ERANGE) { if (ok)*ok = false; return 0.0; } if (ok)*ok = true; return v; }
+    int       FeatureService::parseInt(const std::string& s, bool* ok) { char* e = 0; errno = 0; long v = strtol(s.c_str(), &e, 10); if (e == s.c_str() || *e != '\0' || errno == ERANGE || v<INT_MIN || v>INT_MAX) { if (ok)*ok = false; return 0; } if (ok)*ok = true; return (int)v; }
+    long long FeatureService::parseLongLong(const std::string& s, bool* ok) { char* e = 0; errno = 0; long long v = strtoll(s.c_str(), &e, 10); if (e == s.c_str() || *e != '\0' || errno == ERANGE) { if (ok)*ok = false; return 0; } if (ok)*ok = true; return v; }
+    double    FeatureService::parseDouble(const std::string& s, bool* ok) { char* e = 0; errno = 0; double v = strtod(s.c_str(), &e); if (e == s.c_str() || *e != '\0' || errno == ERANGE) { if (ok)*ok = false; return 0.0; } if (ok)*ok = true; return v; }
 
     double FeatureService::getDoubleOr(const std::string& key, double fallback) const {
-        auto it = opts_.find(key);
-        if (it == opts_.end()) return fallback;
-        bool ok = false; double v = parseDouble(it->second, &ok);
-        return ok ? v : fallback;
+        auto it = opts_.find(key); if (it == opts_.end()) return fallback;
+        bool ok = false; double v = parseDouble(it->second, &ok); return ok ? v : fallback;
     }
     long long FeatureService::getLongLongOr(const std::string& key, long long fallback) const {
-        auto it = opts_.find(key);
-        if (it == opts_.end()) return fallback;
-        bool ok = false; long long v = parseLongLong(it->second, &ok);
-        return ok ? v : fallback;
+        auto it = opts_.find(key); if (it == opts_.end()) return fallback;
+        bool ok = false; long long v = parseLongLong(it->second, &ok); return ok ? v : fallback;
     }
     int FeatureService::getIntOr(const std::string& key, int fallback) const {
-        auto it = opts_.find(key);
-        if (it == opts_.end()) return fallback;
-        bool ok = false; int v = parseInt(it->second, &ok);
-        return ok ? v : fallback;
+        auto it = opts_.find(key); if (it == opts_.end()) return fallback;
+        bool ok = false; int v = parseInt(it->second, &ok); return ok ? v : fallback;
     }
     bool FeatureService::getBoolOr(const std::string& key, bool fallback) const {
-        auto it = opts_.find(key);
-        if (it == opts_.end()) return fallback;
-        bool ok = false; bool v = parseBool(it->second, &ok);
-        return ok ? v : fallback;
+        auto it = opts_.find(key); if (it == opts_.end()) return fallback;
+        bool ok = false; bool v = parseBool(it->second, &ok); return ok ? v : fallback;
     }
 
 } // namespace feat
