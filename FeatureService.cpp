@@ -37,12 +37,17 @@ namespace feat {
         handlers_[tag].push_back(std::move(e));
     }
 
+    // ---------- deleteFeatureEvent ----------
+    void deleteFeatureEvent(void* p) {
+        FeatureEvent* ev = static_cast<FeatureEvent*>(p);
+        if (ev->free_info && ev->info) ev->free_info(ev->info);
+        delete ev;
+    }
+
     // ---------- dispatch ----------
-    // Snapshots the handler list under the lock so handlers may safely call on()
-    // or stop() without deadlocking.
-    // Each HandlerEntry::fn receives the shared `info` (not owned — do not free it).
-    // fn's return value is privately owned; freed immediately by HandlerEntry::del.
-    // The original `info` is freed once after all entries run via free_info.
+    // Per-tag handlers run first, synchronously, with non-owning access to info.
+    // Then a heap-allocated FeatureEvent is handed to cb_; the callback owns it
+    // and must call deleteFeatureEvent() when done (frees info + the event itself).
     void FeatureService::dispatch(const char* tag, FeatureTicket ticket,
                                   void* info, void(*free_info)(void*)) {
         std::vector<HandlerEntry> fns;
@@ -52,20 +57,19 @@ namespace feat {
             if (it != handlers_.end()) fns = it->second;
         }
 
-        FeatureEvent ev;
-        ev.tag       = tag;
-        ev.ticket    = ticket;
-        ev.info      = info;
-        ev.free_info = free_info;
-
-        if (cb_) cb_(cb_user_, &ev);                    // universal catch-all first
-
-        for (size_t i = 0; i < fns.size(); ++i) {       // per-tag handlers
+        for (size_t i = 0; i < fns.size(); ++i) {       // per-tag handlers: sync, non-owning
             void* result = fns[i].fn(info);
             if (result && fns[i].del) fns[i].del(result);
         }
 
-        if (free_info && info) free_info(info);          // free shared input once
+        FeatureEvent* ev = new FeatureEvent();           // heap-allocated; client owns it
+        ev->tag       = tag;
+        ev->ticket    = ticket;
+        ev->info      = info;
+        ev->free_info = free_info;
+
+        if (cb_) cb_(cb_user_, ev);                     // transfer ownership to callback
+        else     deleteFeatureEvent(ev);                 // no callback: free immediately
     }
 
     // ---------- start ----------

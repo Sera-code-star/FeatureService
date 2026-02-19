@@ -35,15 +35,19 @@ namespace feat {
     typedef std::uint64_t FeatureTicket;
 
     // ---------- Event ----------
-    // Self-describing event packet delivered to every handler registered for its tag.
-    // `info` is a heap allocation owned by the event; freed by `free_info` after all
-    // handlers return. Handlers must not hold the `info` pointer beyond their call.
+    // Heap-allocated event packet handed to the universal FeatureCallback.
+    // The callback takes ownership; call deleteFeatureEvent(ev) when done.
+    // Per-tag handlers (on()) receive info directly and do NOT own the event.
     struct FeatureEvent {
         const char*   tag;              // static string literal; one of TAG_* below
         FeatureTicket ticket;           // 0 for service-level events
         void*         info;             // tag-specific heap data; null if none
-        void        (*free_info)(void*);// how to free `info`; null iff info is null
+        void        (*free_info)(void*);// used by deleteFeatureEvent to free info
     };
+
+    // Free a heap FeatureEvent delivered to a FeatureCallback.
+    // Releases ev->info via ev->free_info, then deletes the event itself.
+    void deleteFeatureEvent(void* ev);
 
     // ---------- Tags ----------
     static const char* const TAG_START  = "start";   // service → Running
