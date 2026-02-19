@@ -108,7 +108,7 @@ namespace feat {
     // ---------- FeatureService ----------
     class FeatureService {
     public:
-        explicit FeatureService(FeatureCallback cb              = nullptr,
+        explicit FeatureService(FeatureCallback cb,
                                 const FeatureOptions& opts     = FeatureOptions(),
                                 const std::vector<IFeatureLib*>& libs = std::vector<IFeatureLib*>(),
                                 IFeatureVerifier* verifier     = nullptr);
@@ -179,7 +179,7 @@ namespace feat {
         // t==nullptr → service event: ticket=0, tag=tag, data=null, input=null.
         // t!=nullptr → task result:   ticket=t->id, tag from t->input->tag,
         //                             biz_func called if status==Ok.
-        // Callback owns output and input; service frees neither.
+        // cb_ is always valid; callback owns output and input, service frees neither.
         void dispatch(Task* t, const char* tag, Status status);
 
         // Parsing helpers

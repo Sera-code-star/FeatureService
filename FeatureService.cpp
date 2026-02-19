@@ -111,12 +111,7 @@ namespace feat {
         out->status = status;
         out->data   = out_data;
 
-        if (cb_) {
-            cb_(ticket, static_cast<void*>(out), input);
-        } else {
-            deleteOutput(static_cast<void*>(out));
-            if (input) deleteInput(input);
-        }
+        cb_(ticket, static_cast<void*>(out), input);
 
         if (t) t->input = nullptr;  // ownership transferred; guard against double-use
     }
