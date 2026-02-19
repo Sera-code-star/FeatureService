@@ -151,10 +151,13 @@ namespace feat {
         FeatureCallback cb_;
         void*           cb_user_;
 
-        // per-tag handler registry
+        // per-tag handler registry (registration, guarded by handlers_mtx_)
         struct HandlerEntry { FeatureHandlerFn fn; FeatureHandlerDel del; };
         std::unordered_map<std::string, std::vector<HandlerEntry>> handlers_;
         std::mutex handlers_mtx_;
+
+        // read-only snapshot built once at start(); used by dispatch() with no lock
+        std::unordered_map<std::string, std::vector<HandlerEntry>> dispatch_table_;
 
         std::atomic<ServiceState>                state_;
         const FeatureOptions                     opts_;

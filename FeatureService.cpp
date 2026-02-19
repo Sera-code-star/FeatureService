@@ -50,16 +50,14 @@ namespace feat {
     // and must call deleteFeatureEvent() when done (frees info + the event itself).
     void FeatureService::dispatch(const char* tag, FeatureTicket ticket,
                                   void* info, void(*free_info)(void*)) {
-        std::vector<HandlerEntry> fns;
-        {
-            std::lock_guard<std::mutex> lk(handlers_mtx_);
-            auto it = handlers_.find(tag);
-            if (it != handlers_.end()) fns = it->second;
-        }
+        // dispatch_table_ is frozen at start(); no lock or copy needed
+        auto it = dispatch_table_.find(tag);
+        const std::vector<HandlerEntry>* fns =
+            (it != dispatch_table_.end()) ? &it->second : nullptr;
 
-        for (size_t i = 0; i < fns.size(); ++i) {       // per-tag handlers: sync, non-owning
-            void* result = fns[i].fn(info);
-            if (result && fns[i].del) fns[i].del(result);
+        for (size_t i = 0; fns && i < fns->size(); ++i) {     // per-tag handlers: sync, non-owning
+            void* result = (*fns)[i].fn(info);
+            if (result && (*fns)[i].del) (*fns)[i].del(result);
         }
 
         FeatureEvent* ev = new FeatureEvent();           // heap-allocated; client owns it
@@ -80,6 +78,7 @@ namespace feat {
 
         stop_flag_.store(false);
         authKeywords_.clear();
+        { std::lock_guard<std::mutex> lk(handlers_mtx_); dispatch_table_ = handlers_; }
 
         Task* initTask = new (std::nothrow) Task();
         if (!initTask) {
