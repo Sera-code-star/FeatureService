@@ -32,12 +32,11 @@ namespace feat {
     }
 
     // ---------- ctor / dtor ----------
-    FeatureService::FeatureService(FeatureCallback cb, void* cb_user,
+    FeatureService::FeatureService(FeatureCallback cb,
                                    const FeatureOptions& opts,
                                    const std::vector<IFeatureLib*>& libs,
                                    IFeatureVerifier* verifier)
         : cb_(cb)
-        , cb_user_(cb_user)
         , state_(ServiceState::NotRunning)
         , opts_(opts)
         , libs_(libs)
@@ -95,7 +94,7 @@ namespace feat {
         out->tag    = tag;
         out->status = Status::Ok;
         out->data   = nullptr;
-        if (cb_) cb_(cb_user_, 0, static_cast<void*>(out), nullptr);
+        if (cb_) cb_(0, static_cast<void*>(out), nullptr);
         else     deleteOutput(static_cast<void*>(out));
     }
 
@@ -118,7 +117,7 @@ namespace feat {
         // Pass both output and original input to the callback.
         // Service does NOT free either; client calls deleteInput / deleteOutput.
         if (cb_) {
-            cb_(cb_user_, t->id, static_cast<void*>(out), static_cast<void*>(t->input));
+            cb_(t->id, static_cast<void*>(out), static_cast<void*>(t->input));
         } else {
             // No callback registered: avoid leaks by cleaning up ourselves.
             deleteOutput(static_cast<void*>(out));

@@ -77,14 +77,13 @@ namespace feat {
     // ---------- Callback ----------
     // Fired for every task result and for service lifecycle events (TAG_START/TAG_STOP).
     //
-    //   ticket  — matches the value returned by submit(); 0 for lifecycle events.
-    //   output  — FeatureOutput*; always non-null.  Call svc.deleteOutput(output) when done.
-    //   input   — FeatureInput* that was passed to submit(); null for lifecycle events.
-    //             Call svc.deleteInput(input) when done.
+    //   ticket — matches the value returned by submit(); 0 for lifecycle events.
+    //   output — FeatureOutput*; always non-null.  Call svc.deleteOutput(output) when done.
+    //   input  — FeatureInput* that was passed to submit(); null for lifecycle events.
+    //            Call svc.deleteInput(input) when done.
     //
-    // The service does NOT free input or output; the callback owns both.
-    typedef void(*FeatureCallback)(void* cb_user,
-                                   FeatureTicket ticket,
+    // The service stores no client state; the callback owns both pointers.
+    typedef void(*FeatureCallback)(FeatureTicket ticket,
                                    void* output,
                                    void* input);
 
@@ -110,7 +109,6 @@ namespace feat {
     class FeatureService {
     public:
         explicit FeatureService(FeatureCallback cb              = nullptr,
-                                void* cb_user                  = nullptr,
                                 const FeatureOptions& opts     = FeatureOptions(),
                                 const std::vector<IFeatureLib*>& libs = std::vector<IFeatureLib*>(),
                                 IFeatureVerifier* verifier     = nullptr);
@@ -197,7 +195,6 @@ namespace feat {
 
     private:
         FeatureCallback cb_;
-        void*           cb_user_;
 
         // per-tag handler registry (guarded by handlers_mtx_)
         struct HandlerEntry {
