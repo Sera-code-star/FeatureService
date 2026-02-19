@@ -28,18 +28,24 @@ namespace feat {
     }
 
     // ---------- on ----------
-    void FeatureService::on(const char* tag, FeatureHandler handler) {
-        if (!tag || !handler) return;
+    void FeatureService::on(const char* tag, FeatureHandlerFn fn, FeatureHandlerDel del) {
+        if (!tag || !fn) return;
+        HandlerEntry e;
+        e.fn  = std::move(fn);
+        e.del = std::move(del);
         std::lock_guard<std::mutex> lk(handlers_mtx_);
-        handlers_[tag].push_back(std::move(handler));
+        handlers_[tag].push_back(std::move(e));
     }
 
     // ---------- dispatch ----------
     // Snapshots the handler list under the lock so handlers may safely call on()
-    // or stop() without deadlocking. Frees info after all handlers return.
+    // or stop() without deadlocking.
+    // Each HandlerEntry::fn receives the shared `info` (not owned — do not free it).
+    // fn's return value is privately owned; freed immediately by HandlerEntry::del.
+    // The original `info` is freed once after all entries run via free_info.
     void FeatureService::dispatch(const char* tag, FeatureTicket ticket,
                                   void* info, void(*free_info)(void*)) {
-        std::vector<FeatureHandler> fns;
+        std::vector<HandlerEntry> fns;
         {
             std::lock_guard<std::mutex> lk(handlers_mtx_);
             auto it = handlers_.find(tag);
@@ -52,10 +58,14 @@ namespace feat {
         ev.info      = info;
         ev.free_info = free_info;
 
-        if (cb_) cb_(cb_user_, &ev);                          // universal catch-all first
-        for (size_t i = 0; i < fns.size(); ++i) fns[i](ev);  // then per-tag handlers
+        if (cb_) cb_(cb_user_, &ev);                    // universal catch-all first
 
-        if (free_info && info) free_info(info);
+        for (size_t i = 0; i < fns.size(); ++i) {       // per-tag handlers
+            void* result = fns[i].fn(info);
+            if (result && fns[i].del) fns[i].del(result);
+        }
+
+        if (free_info && info) free_info(info);          // free shared input once
     }
 
     // ---------- start ----------
