@@ -58,7 +58,7 @@ namespace feat {
                 if (!libs_[i]) {
                     ServiceState exp = ServiceState::Initializing;
                     if (state_.compare_exchange_strong(exp, ServiceState::NotRunning)) {
-                        emitRunningEvent(false); // null lib — cannot proceed
+                        emit(false); // null lib — cannot proceed
                         stop_flag_.store(true);
                     }
                     return;
@@ -72,7 +72,7 @@ namespace feat {
                     ServiceState exp = ServiceState::Initializing;
                     if (state_.compare_exchange_strong(exp, ServiceState::NotRunning)) {
                         authKeywords_.clear();
-                        emitRunningEvent(false); // lib init failed
+                        emit(false); // lib init failed
                         stop_flag_.store(true);
                     }
                     return;
@@ -94,7 +94,7 @@ namespace feat {
                 authKeywords_.clear(); // stop() already set NotRunning
                 return;
             }
-            emitRunningEvent(true); // all libs ready — RUNNING
+            emit(true); // all libs ready — RUNNING
         };
 
         {
@@ -144,7 +144,7 @@ namespace feat {
             current_ = nullptr;
         }
         authKeywords_.clear();
-        if (!joinable) emitRunningEvent(false); // STOPPED (skipped when caller blocks and handles it)
+        if (!joinable) emit(false); // STOPPED (skipped when caller blocks and handles it)
         return Status::Ok;
     }
 
@@ -206,7 +206,7 @@ namespace feat {
 
         // Emit terminal "done" (empty) only for pending cancels.
         if (emitEmpty) {
-            emitResult(ticket, NULL, 0);
+            emit(ticket, NULL, 0);
         }
 
         return Status::Ok;
@@ -240,7 +240,7 @@ namespace feat {
                 delete t;
             } else {
                 // Normal task: emit the single terminal result.
-                emitResult(t->id, out.empty() ? NULL : out.data(), out.size());
+                emit(t->id, out.empty() ? NULL : out.data(), out.size());
                 {
                     std::lock_guard<std::mutex> lk(mtx_);
                     if (current_ == t) current_ = nullptr;
@@ -251,58 +251,42 @@ namespace feat {
         }
     }
 
-    // ---------- events ----------
-    FeaturePayload* FeatureService::makeRunningPayload(bool running) {
-        FeaturePayload* p = static_cast<FeaturePayload*>(std::malloc(sizeof(FeaturePayload)));
-        if (!p) return 0;
-
-        FeatureRunningData* d = static_cast<FeatureRunningData*>(std::malloc(sizeof(FeatureRunningData)));
-        if (!d) { std::free(p); return 0; }
-
-        std::memcpy(p->tag, TAG_FEAT_RUNNING_V1, 8);
-        d->state = running ? FeatureRunningState::Running : FeatureRunningState::NotRunning;
-
-        p->data = d;
-        return p;
-    }
-
-    void FeatureService::emitRunningEvent(bool running) {
-        if (!cb_) return;
-        FeaturePayload* pl = makeRunningPayload(running);
-        if (!pl) return; // OOM: drop silently
-        cb_(cb_user_, pl); // user must release via DeletePayload()
-    }
-
-    void FeatureService::emitResult(FeatureTicket ticket, const void* data_ptr, size_t size) {
+    // ---------- emit (unified) ----------
+    // Lifecycle variant: builds a FEATRUN1 payload and fires the callback.
+    void FeatureService::emit(bool running) {
         if (!cb_) return;
 
         FeaturePayload* p = static_cast<FeaturePayload*>(std::malloc(sizeof(FeaturePayload)));
         if (!p) return;
+        FeatureRunningData* d = static_cast<FeatureRunningData*>(std::malloc(sizeof(FeatureRunningData)));
+        if (!d) { std::free(p); return; }
 
+        std::memcpy(p->tag, TAG_FEAT_RUNNING_V1, 8);
+        d->state = running ? FeatureRunningState::Running : FeatureRunningState::NotRunning;
+        p->data  = d;
+        cb_(cb_user_, p);
+    }
+
+    // Task-result variant: builds a FEATRES1 payload and fires the callback.
+    void FeatureService::emit(FeatureTicket ticket, const void* data_ptr, size_t size) {
+        if (!cb_) return;
+
+        FeaturePayload* p = static_cast<FeaturePayload*>(std::malloc(sizeof(FeaturePayload)));
+        if (!p) return;
         FeatureResultData* d = static_cast<FeatureResultData*>(std::malloc(sizeof(FeatureResultData)));
         if (!d) { std::free(p); return; }
 
         std::memcpy(p->tag, TAG_FEAT_RESULT_V1, 8);
         d->ticket = ticket;
-
         if (data_ptr && size) {
             void* buf = std::malloc(size);
-            if (!buf) {
-                d->data = NULL; d->size = 0;
-            }
-            else {
-                std::memcpy(buf, data_ptr, size);
-                d->data = buf;
-                d->size = size;
-            }
+            if (!buf) { d->data = NULL; d->size = 0; }
+            else      { std::memcpy(buf, data_ptr, size); d->data = buf; d->size = size; }
+        } else {
+            d->data = NULL; d->size = 0;
         }
-        else {
-            d->data = NULL;
-            d->size = 0;
-        }
-
         p->data = d;
-        cb_(cb_user_, p); // user must release via DeletePayload()
+        cb_(cb_user_, p);
     }
 
     // ---------- class-scoped static deleters ----------

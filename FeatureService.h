@@ -150,12 +150,9 @@ namespace feat {
         double      getDoubleOr(const std::string& key, double fallback) const;
 
     private:
-        // Emit lifecycle (Running/NotRunning)
-        void                emitRunningEvent(bool running);
-        static FeaturePayload* makeRunningPayload(bool running);
-
-        // Emit result (ticket + data); data_ptr may be NULL/size=0 (empty).
-        void emitResult(FeatureTicket ticket, const void* data_ptr, size_t size);
+        // Unified emit — overloaded on event data; builds and delivers the payload.
+        void emit(bool running);                                          // lifecycle event
+        void emit(FeatureTicket ticket, const void* data, size_t size);  // task-result event
 
         // Built-in deleters
         static void DefaultFree(FeaturePayload* payload); // for FEATRUN1
