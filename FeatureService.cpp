@@ -7,19 +7,34 @@
 
 namespace feat {
 
-    // ---------- deleteFeatureInput ----------
-    void deleteFeatureInput(void* p) {
+    // ---------- deleteInput ----------
+    // Looks up free_input for fi->tag in handlers_, calls it on fi->data, then frees
+    // the FeatureInput envelope.  Safe to call with null.
+    void FeatureService::deleteInput(void* p) {
         FeatureInput* fi = static_cast<FeatureInput*>(p);
         if (!fi) return;
-        if (fi->free_data && fi->data) fi->free_data(fi->data);
+        {
+            std::lock_guard<std::mutex> lk(handlers_mtx_);
+            auto it = handlers_.find(fi->tag);
+            if (it != handlers_.end() && it->second.free_input && fi->data)
+                it->second.free_input(fi->data);
+        }
         std::free(fi);
     }
 
-    // ---------- deleteFeatureOutput ----------
-    void deleteFeatureOutput(void* p) {
+    // ---------- deleteOutput ----------
+    // Looks up free_output for fo->tag in handlers_, calls it on fo->data, then deletes
+    // the FeatureOutput wrapper.  Safe to call with null; no-op data-free for lifecycle
+    // tags (TAG_START/TAG_STOP) which are not in handlers_.
+    void FeatureService::deleteOutput(void* p) {
         FeatureOutput* fo = static_cast<FeatureOutput*>(p);
         if (!fo) return;
-        if (fo->free_data && fo->data) fo->free_data(fo->data);
+        {
+            std::lock_guard<std::mutex> lk(handlers_mtx_);
+            auto it = handlers_.find(fo->tag);
+            if (it != handlers_.end() && it->second.free_output && fo->data)
+                it->second.free_output(fo->data);
+        }
         delete fo;
     }
 
@@ -65,90 +80,58 @@ namespace feat {
     }
 
     // ---------- makeInputEvt ----------
-    // Wraps an already-built featureInput* (from makeFeatureInput or caller-allocated)
-    // together with tag and the registered free_input into a FeatureInput envelope
-    // suitable for submit(). The registered free_input is embedded so that
-    // deleteFeatureInput() can chain-free featureInput then the envelope.
+    // Wraps featureInput* + tag in a malloc'd FeatureInput envelope for submit().
+    // Validates that tag is registered; returns null if not or on allocation failure.
     void* FeatureService::makeInputEvt(const char* tag, void* featureInput) {
         if (!tag) return nullptr;
-
-        FeatureHandlerDel free_data = nullptr;
         {
             std::lock_guard<std::mutex> lk(handlers_mtx_);
-            auto it = handlers_.find(tag);
-            if (it == handlers_.end()) return nullptr;
-            free_data = it->second.free_input;
+            if (handlers_.find(tag) == handlers_.end()) return nullptr;
         }
-
         FeatureInput* fi = static_cast<FeatureInput*>(std::malloc(sizeof(FeatureInput)));
         if (!fi) return nullptr;
-        fi->tag       = tag;
-        fi->data      = featureInput;
-        fi->free_data = free_data;
+        fi->tag  = tag;
+        fi->data = featureInput;
         return static_cast<void*>(fi);
     }
 
     // ---------- dispatchServiceEvent ----------
-    // Fires TAG_START or TAG_STOP with ticket=0 and no data.
+    // Fires TAG_START or TAG_STOP: ticket=0, output{tag,Ok,null}, input=null.
     void FeatureService::dispatchServiceEvent(const char* tag) {
         FeatureOutput* out = new FeatureOutput();
-        out->tag       = tag;
-        out->ticket    = 0;
-        out->status    = Status::Ok;
-        out->data      = nullptr;
-        out->free_data = nullptr;
-        if (cb_) cb_(cb_user_, static_cast<void*>(out));
-        else     deleteFeatureOutput(static_cast<void*>(out));
-    }
-
-    // ---------- deleteTagInput / deleteTagOutput ----------
-    // Universal deleters: search dispatch_table_ by tag and invoke the stored
-    // free_input / free_output function.  No-op when tag is absent or data is null.
-    void FeatureService::deleteTagInput(const char* tag, void* data) {
-        if (!data || !tag) return;
-        auto it = dispatch_table_.find(tag);
-        if (it != dispatch_table_.end() && it->second.free_input)
-            it->second.free_input(data);
-    }
-
-    void FeatureService::deleteTagOutput(const char* tag, void* data) {
-        if (!data || !tag) return;
-        auto it = dispatch_table_.find(tag);
-        if (it != dispatch_table_.end() && it->second.free_output)
-            it->second.free_output(data);
+        out->tag    = tag;
+        out->status = Status::Ok;
+        out->data   = nullptr;
+        if (cb_) cb_(cb_user_, 0, static_cast<void*>(out), nullptr);
+        else     deleteOutput(static_cast<void*>(out));
     }
 
     // ---------- dispatchTask ----------
-    // biz_func and raw_input were resolved at submit() time and live in the Task.
-    // If status==Ok:        calls t->biz_func(t->raw_input) -> actual_output*.
-    // If status==Cancelled: skips biz_func, out_data stays null.
-    // Either way: frees t->raw_input via deleteTagInput, builds FeatureOutput, fires cb_.
-    // Does NOT delete t; caller owns t.
+    // If status==Ok:        calls t->biz_func(t->input->data) -> actual_output*.
+    // If status==Cancelled: skips biz_func; out->data is null.
+    // Fires cb_(user, ticket, output, input) — service does NOT free either ptr.
+    // The callback owns both; it must call svc.deleteOutput(output) and
+    // svc.deleteInput(input) when done.  Does NOT delete t; caller owns t.
     void FeatureService::dispatchTask(Task* t, Status status) {
         void* out_data = nullptr;
-
         if (status == Status::Ok)
-            out_data = t->biz_func(t->raw_input);   // actual_input* -> actual_output*
-
-        // Free raw_input via the universal deleter (searches dispatch_table_ by tag)
-        deleteTagInput(t->tag, t->raw_input);
-
-        // Look up free_output for the caller's FeatureOutput
-        FeatureHandlerDel free_out = nullptr;
-        {
-            auto it = dispatch_table_.find(t->tag);
-            if (it != dispatch_table_.end()) free_out = it->second.free_output;
-        }
+            out_data = t->biz_func(t->input->data);  // actual_input* -> actual_output*
 
         FeatureOutput* out = new FeatureOutput();
-        out->tag       = t->tag;
-        out->ticket    = t->id;
-        out->status    = status;
-        out->data      = out_data;
-        out->free_data = free_out;
+        out->tag    = t->input->tag;
+        out->status = status;
+        out->data   = out_data;
 
-        if (cb_) cb_(cb_user_, static_cast<void*>(out));
-        else     deleteFeatureOutput(static_cast<void*>(out));
+        // Pass both output and original input to the callback.
+        // Service does NOT free either; client calls deleteInput / deleteOutput.
+        if (cb_) {
+            cb_(cb_user_, t->id, static_cast<void*>(out), static_cast<void*>(t->input));
+        } else {
+            // No callback registered: avoid leaks by cleaning up ourselves.
+            deleteOutput(static_cast<void*>(out));
+            deleteInput(static_cast<void*>(t->input));
+        }
+        t->input = nullptr;  // ownership transferred; guard against double-use
     }
 
     // ---------- start ----------
@@ -249,16 +232,22 @@ namespace feat {
 
         if (!wasActive) return Status::Ok;
 
+        // Collect pending user tasks under the lock, then fire Cancelled callbacks
+        // outside it so the client can safely call deleteInput/deleteOutput.
+        std::vector<Task*> pending;
         {
             std::lock_guard<std::mutex> lk(mtx_);
             for (Task* t : queue_) {
-                if (!t->internal)
-                    deleteTagInput(t->tag, t->raw_input);  // universal delete by tag
-                delete t;
+                if (t->internal) delete t;
+                else             pending.push_back(t);
             }
             queue_.clear();
             tasks_.clear();
             current_ = nullptr;
+        }
+        for (Task* t : pending) {
+            dispatchTask(t, Status::Cancelled);  // fires callback; client gets input back
+            delete t;
         }
         authKeywords_.clear();
 
@@ -267,11 +256,10 @@ namespace feat {
     }
 
     // ---------- submit ----------
-    // At submit time: looks up biz_func for evt->tag in dispatch_table_,
-    // extracts raw_input (evt->data) + the three function pointers into a Task,
-    // frees the FeatureInput envelope, then enqueues the Task.
-    // The worker calls biz_func(raw_input) when it dequeues the task.
-    // On failure (returns 0): input is NOT consumed; caller must call deleteFeatureInput().
+    // Looks up biz_func for fi->tag at enqueue time; stores the whole FeatureInput*
+    // in the Task (service does NOT free it).  The worker calls biz_func(fi->data) and
+    // then fires the callback with both output and the original input.
+    // On failure (returns 0): input is NOT consumed; caller must call svc.deleteInput(p).
     FeatureTicket FeatureService::submit(void* input) {
         if (!input) return 0;
         FeatureInput* fi = static_cast<FeatureInput*>(input);
@@ -279,32 +267,21 @@ namespace feat {
         if (state_.load() != ServiceState::Running) return 0;
         if (verifier_ && !verifier_->isAuthorized(authKeywords_)) return 0;
 
-        // Look up biz_func at submit() time from the snapshot built at start().
+        // Resolve biz_func now from the start()-time snapshot (no lock needed).
         auto it = dispatch_table_.find(fi->tag);
-        if (it == dispatch_table_.end()) return 0;   // no handler registered for tag
+        if (it == dispatch_table_.end()) return 0;
 
         Task* t = new (std::nothrow) Task();
         if (!t) return 0;
 
-        t->id        = next_ticket_.fetch_add(1);
-        t->tag       = fi->tag;
-        t->raw_input = fi->data;           // actual_input*; task now owns it
-        t->biz_func  = it->second.biz_func;
-        // free_input / free_output are NOT stored in Task; the service resolves
-        // them at use-time via deleteTagInput / deleteTagOutput (dispatch_table_).
-        t->internal  = false;
-
-        // Consume the FeatureInput envelope (data ownership transferred to task above).
-        fi->free_data = nullptr;           // prevent deleteFeatureInput from freeing data
-        std::free(fi);                     // free the envelope only
+        t->id       = next_ticket_.fetch_add(1);
+        t->input    = fi;                   // whole envelope; service holds until callback
+        t->biz_func = it->second.biz_func;
+        t->internal = false;
 
         {
             std::lock_guard<std::mutex> lk(mtx_);
-            if (stop_flag_.load()) {
-                deleteTagInput(t->tag, t->raw_input);  // universal delete by tag
-                delete t;
-                return 0;
-            }
+            if (stop_flag_.load()) { delete t; return 0; }  // caller still owns fi
             queue_.push_back(t);
             tasks_[t->id] = t;
         }
@@ -315,7 +292,6 @@ namespace feat {
     // ---------- cancel ----------
     Status FeatureService::cancel(FeatureTicket ticket) {
         Task* found = nullptr;
-        bool pendingCancelled = false;
 
         {
             std::lock_guard<std::mutex> lk(mtx_);
@@ -327,22 +303,20 @@ namespace feat {
                     found = *qit;
                     queue_.erase(qit);
                     tasks_.erase(ticket);
-                    pendingCancelled = true;
                     break;
                 }
             }
 
-            // Not in queue: must be the currently running task; can't interrupt it
-            if (!pendingCancelled && current_ != it->second)
+            // Not in queue: currently running; can't interrupt it
+            if (!found && current_ != it->second)
                 return Status::NotFound;
         }
 
-        // dispatchTask frees found->raw_input and fires callback with status=Cancelled
-        if (pendingCancelled) {
+        if (found) {
+            // Fire Cancelled callback; client receives original input back and frees it.
             dispatchTask(found, Status::Cancelled);
             delete found;
         }
-
         return Status::Ok;
     }
 
