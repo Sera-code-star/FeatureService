@@ -102,8 +102,8 @@ namespace feat {
 
         if (t && status == Status::Ok) {
             out_data = t->biz_func(t->input->data);  // actual_input* -> actual_output*
-            auto it = dispatch_table_.find(t->input->tag);
-            if (it != dispatch_table_.end()) out_free_fn = it->second.free_output;
+            auto it = handlers_.find(t->input->tag);  // read-only after start(); no lock
+            if (it != handlers_.end()) out_free_fn = it->second.free_output;
         }
 
         FeatureOutput* out = new FeatureOutput();
@@ -125,7 +125,6 @@ namespace feat {
 
         stop_flag_.store(false);
         authKeywords_.clear();
-        { std::lock_guard<std::mutex> lk(handlers_mtx_); dispatch_table_ = handlers_; }
 
         Task* initTask = new (std::nothrow) Task();
         if (!initTask) {
@@ -250,9 +249,9 @@ namespace feat {
         if (state_.load() != ServiceState::Running) return 0;
         if (verifier_ && !verifier_->isAuthorized(authKeywords_)) return 0;
 
-        // Resolve biz_func now from the start()-time snapshot (no lock needed).
-        auto it = dispatch_table_.find(fi->tag);
-        if (it == dispatch_table_.end()) return 0;
+        // Resolve biz_func from handlers_ (read-only after start(); no lock needed).
+        auto it = handlers_.find(fi->tag);
+        if (it == handlers_.end()) return 0;
 
         Task* t = new (std::nothrow) Task();
         if (!t) return 0;

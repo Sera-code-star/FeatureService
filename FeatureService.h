@@ -200,17 +200,15 @@ namespace feat {
     private:
         FeatureCallback cb_;
 
-        // per-tag handler registry (guarded by handlers_mtx_)
+        // per-tag handler registry; written only before start(), read-only after.
+        // No lock is taken in dispatch() or submit() — on() is pre-start-only.
         struct HandlerEntry {
             FeatureHandlerFn  biz_func;
             FeatureHandlerDel free_input;
             FeatureHandlerDel free_output;
         };
         std::unordered_map<std::string, HandlerEntry> handlers_;
-        std::mutex handlers_mtx_;
-
-        // read-only snapshot built once at start(); used by dispatch() with no lock
-        std::unordered_map<std::string, HandlerEntry> dispatch_table_;
+        std::mutex handlers_mtx_;  // guards concurrent on() calls before start()
 
         std::atomic<ServiceState>                state_;
         const FeatureOptions                     opts_;
@@ -232,7 +230,7 @@ namespace feat {
         FeatureTicket    id;
         // User tasks (internal == false):
         FeatureInput*    input;     // whole envelope; service holds it until callback fires
-        FeatureHandlerFn biz_func;  // resolved at submit() time from dispatch_table_
+        FeatureHandlerFn biz_func;  // resolved at submit() time from handlers_
         // Internal tasks (internal == true):
         std::function<void(std::vector<uint8_t>&)> fn;
         bool internal = false;
