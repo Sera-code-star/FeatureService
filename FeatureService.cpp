@@ -181,6 +181,8 @@ namespace feat {
 
         {
             std::lock_guard<std::mutex> lk(mtx_);
+            tasks_.clear();
+            current_ = nullptr;
             queue_.push_back(initTask);
         }
 
@@ -223,10 +225,9 @@ namespace feat {
             std::lock_guard<std::mutex> lk(mtx_);
             for (Task* t : queue_) {
                 if (t->internal) delete t;
-                else             pending.push_back(t);
+                else { tasks_.erase(t->id); pending.push_back(t); }
             }
             queue_.clear();
-            tasks_.clear();
             current_ = nullptr;
         }
         for (Task* t : pending) {
