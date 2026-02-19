@@ -45,28 +45,30 @@ namespace feat {
     // ---------- FeatureInput ----------
     // Heap wrapper around the caller's typed input struct.
     //
-    // Build with svc.makeInputEvt(tag, actual_input*) and pass to submit().
+    // Build with makeInputEvt(tag, actual_input*, free_fn) and pass to submit().
     //
     // Ownership:
     //   submit() success (non-zero ticket) -> service holds it; handed back via callback.
-    //   submit() failure (returns 0)       -> caller must call svc.deleteInput(p).
-    //   Callback receives it as the 4th arg; caller must call svc.deleteInput(p) when done.
+    //   submit() failure (returns 0)       -> caller must call deleteInput(p).
+    //   Callback receives it as the 4th arg; caller must call deleteInput(p) when done.
     struct FeatureInput {
-        const char* tag;   // agreed tag identifying the (input, output) type pair
-        void*       data;  // heap-allocated actual typed input struct
+        const char*       tag;     // agreed tag identifying the (input, output) type pair
+        void*             data;    // heap-allocated actual typed input struct
+        FeatureHandlerDel free_fn; // frees data; embedded so deleteInput needs no service ref
     };
 
     // ---------- FeatureOutput ----------
     // Heap-allocated result packet handed to FeatureCallback as the 3rd argument.
-    // The callback takes ownership; call svc.deleteOutput(p) when done.
+    // The callback takes ownership; call deleteOutput(p) when done.
     //
-    // For service lifecycle events (TAG_START / TAG_STOP): data is null.
-    // For task results  (status==Ok):        data is the actual_output* from biz_func.
-    // For cancelled tasks (status==Cancelled): data is null.
+    // For service lifecycle events (TAG_START / TAG_STOP): data and free_fn are null.
+    // For task results  (status==Ok):          data is the actual_output* from biz_func.
+    // For cancelled tasks (status==Cancelled): data and free_fn are null.
     struct FeatureOutput {
-        const char* tag;     // submitted tag, or TAG_START/TAG_STOP for lifecycle events
-        Status      status;  // Ok or Cancelled
-        void*       data;    // heap-allocated actual typed output struct; null if none
+        const char*       tag;     // submitted tag, or TAG_START/TAG_STOP for lifecycle events
+        Status            status;  // Ok or Cancelled
+        void*             data;    // heap-allocated actual typed output struct; null if none
+        FeatureHandlerDel free_fn; // frees data; null for lifecycle events
     };
 
     // ---------- Service lifecycle tags ----------
@@ -78,9 +80,9 @@ namespace feat {
     // Fired for every task result and for service lifecycle events (TAG_START/TAG_STOP).
     //
     //   ticket — matches the value returned by submit(); 0 for lifecycle events.
-    //   output — FeatureOutput*; always non-null.  Call svc.deleteOutput(output) when done.
+    //   output — FeatureOutput*; always non-null.  Call feat::deleteOutput(output) when done.
     //   input  — FeatureInput* that was passed to submit(); null for lifecycle events.
-    //            Call svc.deleteInput(input) when done.
+    //            Call feat::deleteInput(input) when done.
     //
     // The service stores no client state; the callback owns both pointers.
     typedef void(*FeatureCallback)(FeatureTicket ticket,
@@ -104,6 +106,27 @@ namespace feat {
         virtual ~IFeatureVerifier() {}
         virtual bool isAuthorized(const std::vector<std::string>& keywords) const = 0;
     };
+
+    // ---------- Global make / delete helpers ----------
+    // These are free functions so callers can manage FeatureInput/FeatureOutput lifetimes
+    // without holding a reference to the service.
+
+    // Step 1 — allocate a malloc'd copy of data[0..size) as the actual typed input struct.
+    // Free with std::free() if not passed to makeInputEvt().
+    void* makeFeatureInput(const void* data, size_t size);
+
+    // Step 2 — wrap featureInput* in a submit-ready FeatureInput envelope.
+    // free_fn is stored inside the envelope and called by deleteInput() on the data pointer.
+    // Returns null on allocation failure.  Submit returns 0 for unregistered tags.
+    void* makeInputEvt(const char* tag, void* featureInput, FeatureHandlerDel free_fn);
+
+    // Release a FeatureInput: calls fi->free_fn(fi->data) if set, then frees the envelope.
+    // Safe to call with null.
+    void deleteInput(void* input);
+
+    // Release a FeatureOutput: calls fo->free_fn(fo->data) if set, then deletes the envelope.
+    // Safe to call with null; no-op data-free for lifecycle outputs (free_fn is null).
+    void deleteOutput(void* output);
 
     // ---------- FeatureService ----------
     class FeatureService {
@@ -131,29 +154,12 @@ namespace feat {
                 FeatureHandlerDel free_input,
                 FeatureHandlerDel free_output);
 
-        // Step 1 — build the actual typed input struct on the heap.
-        // Makes a malloc'd copy of data[0..size); returns it as void*.
-        // Free with std::free() directly if not passed to makeInputEvt().
-        static void* makeFeatureInput(const void* data, size_t size);
-
-        // Step 2 — wrap the typed input in a submit-ready FeatureInput envelope.
-        // Returns null if tag is not registered or on allocation failure.
-        // Pass the result to submit(); call deleteInput() if submit() returns 0.
-        void* makeInputEvt(const char* tag, void* featureInput);
-
         // Submit a task.
         // input must be a FeatureInput* (from makeInputEvt()) cast to void*.
         // On success (non-zero ticket): service holds input until the callback fires,
         //   at which point the callback receives input as its 4th argument.
-        // On failure (returns 0): caller must call svc.deleteInput(input).
+        // On failure (returns 0): caller must call feat::deleteInput(input).
         FeatureTicket submit(void* input);
-
-        // Universal tag-based deleters for use by the callback owner.
-        // Resolve deleters via dispatch_table_ (the start-time read-only snapshot) —
-        // no lock is taken.  Safe to call with null; no-op data-free for lifecycle-event
-        // outputs whose tags (TAG_START/TAG_STOP) are not in the table.
-        void deleteInput (void* input);
-        void deleteOutput(void* output);
 
         // Cancel a pending task.
         // If the task is still queued: fires the callback with status=Cancelled.
@@ -176,10 +182,10 @@ namespace feat {
 
     private:
         // Unified output-build and callback-fire.
-        // t==nullptr → service event: ticket=0, tag=tag, data=null, input=null.
+        // t==nullptr → service event: ticket=0, tag=tag, data=null, free_fn=null, input=null.
         // t!=nullptr → task result:   ticket=t->id, tag from t->input->tag,
-        //                             biz_func called if status==Ok.
-        // cb_ is always valid; callback owns output and input, service frees neither.
+        //                             biz_func called if status==Ok; free_output embedded in out.
+        // cb_ is always valid; callback owns output and input; service only deletes Task entities.
         void dispatch(Task* t, const char* tag, Status status);
 
         // Parsing helpers
