@@ -178,9 +178,10 @@ namespace feat {
         // ticket=0, data=null, status=Ok.
         void dispatchServiceEvent(const char* tag);
 
-        // Run biz_func on inp->data (unless status==Cancelled), build FeatureOutput,
-        // free inp, then fire the callback.  Takes ownership of inp.
-        void dispatchTask(FeatureInput* inp, FeatureTicket ticket, Status status);
+        // Run t->biz_func(t->raw_input) (unless status==Cancelled), free t->raw_input,
+        // build FeatureOutput{tag,ticket,status,out_data}, and fire the callback.
+        // Does NOT delete t; caller is responsible for that.
+        void dispatchTask(Task* t, Status status);
 
         // Parsing helpers
         static bool       parseBool(const std::string& s, bool* ok);
@@ -224,9 +225,15 @@ namespace feat {
     };
 
     struct FeatureService::Task {
-        FeatureTicket id;
-        void*         input;    // FeatureInput*; null for internal tasks
-        std::function<void(std::vector<uint8_t>&)> fn; // internal tasks only
+        FeatureTicket     id;
+        // User tasks (internal == false): biz_func + raw input extracted at submit() time.
+        const char*       tag;
+        void*             raw_input;    // actual_input*; owned by this task until dispatched
+        FeatureHandlerFn  biz_func;     // looked up in dispatch_table_ by submit()
+        FeatureHandlerDel free_input;   // frees raw_input after biz_func returns (or on cancel)
+        FeatureHandlerDel free_output;  // embedded in FeatureOutput for the caller
+        // Internal tasks (internal == true): lifecycle work (e.g. lib init)
+        std::function<void(std::vector<uint8_t>&)> fn;
         bool internal = false;
     };
 
