@@ -73,13 +73,11 @@ namespace feat {
 
     // ---------- makeInputEvt ----------
     // Wraps featureInput* + tag in a malloc'd FeatureInput envelope for submit().
-    // Validates that tag is registered; returns null if not or on allocation failure.
+    // Validates that tag is in dispatch_table_ (read-only after start; no lock).
+    // Returns null if tag is unknown or on allocation failure.
     void* FeatureService::makeInputEvt(const char* tag, void* featureInput) {
         if (!tag) return nullptr;
-        {
-            std::lock_guard<std::mutex> lk(handlers_mtx_);
-            if (handlers_.find(tag) == handlers_.end()) return nullptr;
-        }
+        if (dispatch_table_.find(tag) == dispatch_table_.end()) return nullptr;
         FeatureInput* fi = static_cast<FeatureInput*>(std::malloc(sizeof(FeatureInput)));
         if (!fi) return nullptr;
         fi->tag  = tag;
