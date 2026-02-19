@@ -8,33 +8,26 @@
 namespace feat {
 
     // ---------- deleteInput ----------
-    // Looks up free_input for fi->tag in handlers_, calls it on fi->data, then frees
-    // the FeatureInput envelope.  Safe to call with null.
+    // Looks up free_input in dispatch_table_ (the start-time snapshot, read-only
+    // after start() — no lock needed), calls it on fi->data, then frees the envelope.
     void FeatureService::deleteInput(void* p) {
         FeatureInput* fi = static_cast<FeatureInput*>(p);
         if (!fi) return;
-        {
-            std::lock_guard<std::mutex> lk(handlers_mtx_);
-            auto it = handlers_.find(fi->tag);
-            if (it != handlers_.end() && it->second.free_input && fi->data)
-                it->second.free_input(fi->data);
-        }
+        auto it = dispatch_table_.find(fi->tag);
+        if (it != dispatch_table_.end() && it->second.free_input && fi->data)
+            it->second.free_input(fi->data);
         std::free(fi);
     }
 
     // ---------- deleteOutput ----------
-    // Looks up free_output for fo->tag in handlers_, calls it on fo->data, then deletes
-    // the FeatureOutput wrapper.  Safe to call with null; no-op data-free for lifecycle
-    // tags (TAG_START/TAG_STOP) which are not in handlers_.
+    // Same: dispatch_table_ is read-only after start(); no lock needed.
+    // No-op data-free for lifecycle tags (TAG_START/TAG_STOP) absent from the table.
     void FeatureService::deleteOutput(void* p) {
         FeatureOutput* fo = static_cast<FeatureOutput*>(p);
         if (!fo) return;
-        {
-            std::lock_guard<std::mutex> lk(handlers_mtx_);
-            auto it = handlers_.find(fo->tag);
-            if (it != handlers_.end() && it->second.free_output && fo->data)
-                it->second.free_output(fo->data);
-        }
+        auto it = dispatch_table_.find(fo->tag);
+        if (it != dispatch_table_.end() && it->second.free_output && fo->data)
+            it->second.free_output(fo->data);
         delete fo;
     }
 

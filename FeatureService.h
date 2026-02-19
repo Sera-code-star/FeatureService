@@ -151,9 +151,9 @@ namespace feat {
         FeatureTicket submit(void* input);
 
         // Universal tag-based deleters for use by the callback owner.
-        // deleteInput : looks up free_input  in handlers_[fi->tag], calls it, frees envelope.
-        // deleteOutput: looks up free_output in handlers_[fo->tag], calls it, deletes wrapper.
-        // Safe to call with null; no-op for lifecycle-event outputs (tag not in handlers_).
+        // Resolve deleters via dispatch_table_ (the start-time read-only snapshot) —
+        // no lock is taken.  Safe to call with null; no-op data-free for lifecycle-event
+        // outputs whose tags (TAG_START/TAG_STOP) are not in the table.
         void deleteInput (void* input);
         void deleteOutput(void* output);
 
