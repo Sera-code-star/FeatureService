@@ -194,7 +194,7 @@ namespace feat {
         // Unified output-build and callback-fire.
         // t==nullptr → service event: ticket=0, tag=tag, data=null, input=null.
         // t!=nullptr → task result:   ticket=t->id, tag from t->input->tag,
-        //                             biz_func called if status==Ok.
+        //                             fn called if status==Ok.
         // cb_ is always valid; callback owns output and input; service only deletes Task entities.
         void dispatch(Task* t, const char* tag, Status status);
 
@@ -233,11 +233,13 @@ namespace feat {
 
     struct FeatureService::Task {
         FeatureTicket    id;
-        // User tasks (internal == false):
-        FeatureInput*    input;     // whole envelope; service holds it until callback fires
-        FeatureHandlerFn biz_func;  // resolved at submit() time from handlers_
-        // Internal tasks (internal == true):
-        std::function<void(std::vector<uint8_t>&)> fn;
+        FeatureInput*    input;    // whole envelope; service holds it until callback fires
+        // Unified callable: void*(void*) signature for both user and internal tasks.
+        // User tasks:     fn = biz_func (resolved from handlers_ at submit() time);
+        //                 called as fn(input->data) -> actual_output* in dispatch().
+        // Internal tasks: fn = lambda wrapping startup logic;
+        //                 called as fn(nullptr), return value ignored.
+        std::function<void*(void*)> fn;
         bool internal = false;
     };
 

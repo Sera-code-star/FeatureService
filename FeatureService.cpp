@@ -94,7 +94,7 @@ namespace feat {
     //   ticket=0, tag=tag, status=Ok, data=null, input=null.
     //
     // Task result (t != nullptr):
-    //   ticket=t->id, tag=t->input->tag; calls t->biz_func(input->data) if status==Ok.
+    //   ticket=t->id, tag=t->input->tag; calls t->fn(input->data) if status==Ok.
     //   Sets t->input=nullptr after firing; does NOT delete t — caller (service) does.
     //
     // The service only deletes Task entities; deleteInput/deleteOutput look up
@@ -106,7 +106,7 @@ namespace feat {
         void*         out_data = nullptr;
 
         if (t && status == Status::Ok)
-            out_data = t->biz_func(t->input->data);  // actual_input* -> actual_output*
+            out_data = t->fn(t->input->data);  // actual_input* -> actual_output*
 
         FeatureOutput* out = new FeatureOutput();
         out->tag    = out_tag;
@@ -134,7 +134,7 @@ namespace feat {
         }
         initTask->id       = 0;
         initTask->internal = true;
-        initTask->fn = [this](std::vector<uint8_t>&) {
+        initTask->fn = [this](void*) -> void* {
             // Phase 1: null-guard all libs
             for (size_t i = 0; i < libs_.size(); ++i) {
                 if (!libs_[i]) {
@@ -143,13 +143,13 @@ namespace feat {
                         dispatch(nullptr, TAG_STOP, Status::Ok);
                         stop_flag_.store(true);
                     }
-                    return;
+                    return nullptr;
                 }
             }
 
             // Phase 2: init all libs, collect keywords
             for (size_t i = 0; i < libs_.size(); ++i) {
-                if (stop_flag_.load()) { authKeywords_.clear(); return; }
+                if (stop_flag_.load()) { authKeywords_.clear(); return nullptr; }
                 if (!libs_[i]->init(opts_)) {
                     ServiceState exp = ServiceState::Initializing;
                     if (state_.compare_exchange_strong(exp, ServiceState::NotRunning)) {
@@ -157,13 +157,13 @@ namespace feat {
                         dispatch(nullptr, TAG_STOP, Status::Ok);
                         stop_flag_.store(true);
                     }
-                    return;
+                    return nullptr;
                 }
                 std::vector<std::string> kw = libs_[i]->getKeywords();
                 for (size_t j = 0; j < kw.size(); ++j) authKeywords_.push_back(kw[j]);
             }
 
-            if (stop_flag_.load()) { authKeywords_.clear(); return; }
+            if (stop_flag_.load()) { authKeywords_.clear(); return nullptr; }
 
             std::sort(authKeywords_.begin(), authKeywords_.end());
             authKeywords_.erase(std::unique(authKeywords_.begin(), authKeywords_.end()),
@@ -173,9 +173,10 @@ namespace feat {
             ServiceState exp = ServiceState::Initializing;
             if (!state_.compare_exchange_strong(exp, ServiceState::Running)) {
                 authKeywords_.clear();
-                return;
+                return nullptr;
             }
             dispatch(nullptr, TAG_START, Status::Ok);
+            return nullptr;
         };
 
         {
@@ -243,9 +244,9 @@ namespace feat {
     }
 
     // ---------- submit ----------
-    // Looks up biz_func for fi->tag at enqueue time; stores the whole FeatureInput*
-    // in the Task (service does NOT free it).  The worker calls biz_func(fi->data) and
-    // then fires the callback with both output and the original input.
+    // Looks up fn (biz_func) for fi->tag at enqueue time; stores the whole FeatureInput*
+    // in the Task (service does NOT free it).  The worker calls fn(fi->data) via dispatch()
+    // and then fires the callback with both output and the original input.
     // On failure (returns 0): input is NOT consumed; caller must call feat::deleteInput(p).
     FeatureTicket FeatureService::submit(void* input) {
         if (!input) return 0;
@@ -263,7 +264,7 @@ namespace feat {
 
         t->id       = next_ticket_.fetch_add(1);
         t->input    = fi;                   // whole envelope; service holds until callback
-        t->biz_func = it->second.biz_func;
+        t->fn       = it->second.biz_func;
         t->internal = false;
 
         {
@@ -320,13 +321,12 @@ namespace feat {
             }
 
             if (t->internal) {
-                std::vector<uint8_t> out;
-                try { t->fn(out); } catch (...) {}
+                try { t->fn(nullptr); } catch (...) {}
                 delete t;
             } else {
                 FeatureTicket id = t->id;
 
-                // biz_func resolved at submit() time; dispatch calls it and fires cb_.
+                // fn resolved at submit() time; dispatch calls it and fires cb_.
                 dispatch(t, nullptr, Status::Ok);
 
                 {
