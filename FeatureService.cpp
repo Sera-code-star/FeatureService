@@ -30,7 +30,7 @@ namespace feat {
     }
 
     FeatureService::~FeatureService() {
-        stop();
+        stopSync(); // must join before members are destroyed
     }
 
     // ---------- lifecycle ----------
@@ -116,10 +116,13 @@ namespace feat {
         return Status::Ok; // worker will emit Running once the init task completes
     }
 
-    Status FeatureService::stop() {
-        // Transition Running or Initializing → NotRunning; record whether we made the move.
-        // If state was already NotRunning (e.g. after an init-request failure), wasActive=false
-        // but we still join the worker because the thread may still be running.
+    // ---------- shared stop implementation ----------
+    // Signals the worker to stop and performs queue/callback cleanup.
+    // sync=true: also blocks until the worker thread exits (stopSync).
+    // sync=false: returns immediately after signalling (stop); worker
+    //             finishes its current task in the background and then exits.
+    Status FeatureService::doStop(bool sync) {
+        // CAS loop: transition Running or Initializing → NotRunning.
         ServiceState old = state_.load();
         bool wasActive = false;
         for (;;) {
@@ -129,16 +132,17 @@ namespace feat {
             }
         }
 
+        // Signal the worker.
         stop_flag_.store(true);
         cv_.notify_all();
 
-        // Always join: handles a worker that exited after an init-request failure
-        // but whose thread object is still joinable.
-        if (worker_.joinable()) worker_.join();
+        // Sync variant: wait for the worker to finish before cleanup.
+        // Also handles the case where the worker self-exited after an init failure.
+        if (sync && worker_.joinable()) worker_.join();
 
         if (!wasActive) return Status::Ok;
 
-        // delete any pending tasks defensively
+        // --- shared: drain queue, reset tracking, emit NotRunning callback ---
         {
             std::lock_guard<std::mutex> lk(mtx_);
             for (Task* t : queue_) delete t;
@@ -146,12 +150,16 @@ namespace feat {
             tasks_.clear();
             current_ = nullptr;
         }
-
         authKeywords_.clear();
-
         emitRunningEvent(false); // STOPPED
         return Status::Ok;
     }
+
+    // Async stop: signal + cleanup; worker may still be finishing its current task.
+    Status FeatureService::stop()     { return doStop(false); }
+
+    // Sync stop: same as stop() but blocks until the worker thread exits.
+    Status FeatureService::stopSync() { return doStop(true);  }
 
     // ---------- submit ----------
     FeatureTicket FeatureService::submit(const std::function<void(std::vector<uint8_t>& out)>& fn)
