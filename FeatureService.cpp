@@ -93,13 +93,21 @@ namespace feat {
     // Service event (t == nullptr):
     //   ticket=0, tag=tag, status=Ok, data=null, input=null.
     //
-    // Task result (t != nullptr):
+    // Internal task (t->internal == true):
+    //   Calls t->fn(nullptr); no user callback fired.
+    //
+    // User task (t->internal == false):
     //   ticket=t->id, tag=t->input->tag; calls t->fn(input->data) if status==Ok.
     //   Sets t->input=nullptr after firing; does NOT delete t — caller (service) does.
     //
     // The service only deletes Task entities; deleteInput/deleteOutput look up
     // the static handler table to free input/output data.
     void FeatureService::dispatch(Task* t, const char* tag, Status status) {
+        if (t && t->internal) {
+            try { t->fn(nullptr); } catch (...) {}
+            return;
+        }
+
         FeatureTicket ticket  = t ? t->id         : 0;
         const char*   out_tag = t ? t->input->tag : tag;
         void*         input   = t ? static_cast<void*>(t->input) : nullptr;
@@ -321,22 +329,14 @@ namespace feat {
                 if (!t->internal) current_ = t;
             }
 
-            if (t->internal) {
-                try { t->fn(nullptr); } catch (...) {}
-                delete t;
-            } else {
-                FeatureTicket id = t->id;
-
-                // fn resolved at submit() time; dispatch calls it and fires cb_.
-                dispatch(t, nullptr, Status::Ok);
-
-                {
-                    std::lock_guard<std::mutex> lk(mtx_);
-                    if (current_ == t) current_ = nullptr;
-                    tasks_.erase(id);
-                }
-                delete t;
+            FeatureTicket id = t->id;
+            dispatch(t, nullptr, Status::Ok);
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                if (current_ == t) current_ = nullptr;
+                tasks_.erase(id);
             }
+            delete t;
         }
     }
 
