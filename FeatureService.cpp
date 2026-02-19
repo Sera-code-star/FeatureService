@@ -28,10 +28,17 @@ namespace feat {
     }
 
     // ---------- on ----------
-    void FeatureService::on(const char* tag, FeatureHandlerFn fn) {
-        if (!tag || !fn) return;
+    void FeatureService::on(const char* tag, FeatureHandlerFn biz_func, FeatureHandlerDel delete_void) {
+        if (!tag || !biz_func) return;
         std::lock_guard<std::mutex> lk(handlers_mtx_);
-        handlers_[tag] = std::move(fn);
+        handlers_[tag] = { biz_func, delete_void };
+    }
+
+    // ---------- deleteResult ----------
+    void deleteResult(void* p) {
+        FeatureResult* r = static_cast<FeatureResult*>(p);
+        if (r->del && r->data) r->del(r->data);
+        delete r;
     }
 
     // ---------- deleteFeatureEvent ----------
@@ -42,23 +49,30 @@ namespace feat {
     }
 
     // ---------- dispatch ----------
-    // Per-tag handlers run first, synchronously, with non-owning access to info.
-    // Then a heap-allocated FeatureEvent is handed to cb_; the callback owns it
-    // and must call deleteFeatureEvent() when done (frees info + the event itself).
+    // If a handler is registered for tag: calls biz_func(info), frees original info,
+    // and places a heap FeatureResult* in ev->info (user calls deleteResult when done).
+    // If no handler: ev->info = original info, ev->free_info = free_info as-is.
     void FeatureService::dispatch(const char* tag, FeatureTicket ticket,
                                   void* info, void(*free_info)(void*)) {
-        // dispatch_table_ is frozen at start(); no lock or copy needed
         auto it = dispatch_table_.find(tag);
-        if (it != dispatch_table_.end()) it->second(info);     // per-tag handler: sync, non-owning
+        if (it != dispatch_table_.end()) {
+            const HandlerEntry& h = it->second;
+            FeatureResult* r = new FeatureResult();
+            r->data = h.fn(info);                        // biz_func: transform info -> result
+            r->del  = h.del;
+            if (free_info && info) free_info(info);      // original info no longer needed
+            info      = r;
+            free_info = deleteResult;
+        }
 
-        FeatureEvent* ev = new FeatureEvent();           // heap-allocated; client owns it
+        FeatureEvent* ev = new FeatureEvent();
         ev->tag       = tag;
         ev->ticket    = ticket;
-        ev->info      = info;
+        ev->info      = info;                            // FeatureResult* if handler ran, else raw
         ev->free_info = free_info;
 
-        if (cb_) cb_(cb_user_, ev);                     // transfer ownership to callback
-        else     deleteFeatureEvent(ev);                 // no callback: free immediately
+        if (cb_) cb_(cb_user_, ev);
+        else     deleteFeatureEvent(ev);
     }
 
     // ---------- start ----------

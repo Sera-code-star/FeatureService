@@ -65,8 +65,20 @@ namespace feat {
     // FeatureCallback: single C-style universal listener (fires for every tag).
     typedef void(*FeatureCallback)(void* user, const FeatureEvent* ev);
 
-    // FeatureHandlerFn: called with type-erased info; one per tag, registered via on().
-    using FeatureHandlerFn = std::function<void(void*)>;
+    // Raw C function pointers registered per tag via on().
+    typedef void* (*FeatureHandlerFn) (void*);   // biz_func: transforms info -> heap result
+    typedef void  (*FeatureHandlerDel)(void*);   // delete_void: frees that result
+
+    // Heap wrapper placed in FeatureEvent::info when a handler is registered for the tag.
+    // Call deleteResult(ev->info) to free both the result data and this wrapper.
+    struct FeatureResult {
+        void*             data;  // return value of biz_func; null if biz_func returned null
+        FeatureHandlerDel del;   // delete_void supplied to on()
+    };
+
+    // Universal free for a FeatureResult* delivered via FeatureEvent::info.
+    // Calls del(data) then deletes the FeatureResult wrapper.
+    void deleteResult(void* r);
 
     // ---------- Init Options ----------
     typedef std::unordered_map<std::string, std::string> FeatureOptions;
@@ -110,10 +122,10 @@ namespace feat {
         // Cancel
         Status cancel(FeatureTicket ticket);
 
-        // Subscribe a handler to events with the given tag. Thread-safe.
-        // Call before start() to guarantee delivery of TAG_START.
-        // One fn per tag; subsequent calls for the same tag replace the previous fn.
-        void on(const char* tag, FeatureHandlerFn fn);
+        // Link tag to a biz_func + delete_void pair. Thread-safe; call before start().
+        // biz_func(info) -> heap result placed in FeatureEvent::info as FeatureResult*.
+        // delete_void frees that result; call deleteResult(ev->info) when done.
+        void on(const char* tag, FeatureHandlerFn biz_func, FeatureHandlerDel delete_void);
 
         // State snapshot
         bool         isRunning()      const { return state_.load() == ServiceState::Running; }
@@ -149,11 +161,12 @@ namespace feat {
         void*           cb_user_;
 
         // per-tag handler registry (registration, guarded by handlers_mtx_)
-        std::unordered_map<std::string, FeatureHandlerFn> handlers_;
+        struct HandlerEntry { FeatureHandlerFn fn; FeatureHandlerDel del; };
+        std::unordered_map<std::string, HandlerEntry> handlers_;
         std::mutex handlers_mtx_;
 
         // read-only snapshot built once at start(); used by dispatch() with no lock
-        std::unordered_map<std::string, FeatureHandlerFn> dispatch_table_;
+        std::unordered_map<std::string, HandlerEntry> dispatch_table_;
 
         std::atomic<ServiceState>                state_;
         const FeatureOptions                     opts_;
