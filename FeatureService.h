@@ -108,15 +108,14 @@ namespace feat {
         FeatureService& operator=(const FeatureService&) = delete;
 
         // Lifecycle
-        //   start()    — async: spawns worker, returns immediately; Running callback fires when ready.
-        //   stop()     — async: signals worker, drains queue, fires NotRunning callback, returns
-        //                immediately (worker may still be finishing its current task).
-        //   stopSync() — same as stop() but also blocks until the worker thread exits.
-        //                Use stopSync() (or let the destructor do it) before re-starting or
-        //                destroying the service.
+        //   start()         — async: spawns worker; Running callback fires when ready.
+        //   stop()          — async: signals worker, drains queue, fires NotRunning callback;
+        //                     worker may still be finishing its current task on return.
+        //   stop(true)      — same but blocks until the worker thread exits.
+        //                     Pass true (or let the destructor do it) before re-starting
+        //                     or destroying the service.
         Status start();
-        Status stop();
-        Status stopSync();
+        Status stop(bool joinable = false);
 
         // Submit (always cancellable):
         // - fn(out) must fill 'out' with result bytes (may be empty).
@@ -172,9 +171,6 @@ namespace feat {
         struct Task;
         void workerLoop();
 
-        // Shared stop logic: drain queue, clear state, emit NotRunning callback.
-        // If sync=true, also joins the worker thread before cleanup.
-        Status doStop(bool sync);
 
     private:
         // callback

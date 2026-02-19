@@ -30,7 +30,7 @@ namespace feat {
     }
 
     FeatureService::~FeatureService() {
-        stopSync(); // must join before members are destroyed
+        stop(true); // must join before members are destroyed
     }
 
     // ---------- lifecycle ----------
@@ -116,12 +116,8 @@ namespace feat {
         return Status::Ok; // worker will emit Running once the init task completes
     }
 
-    // ---------- shared stop implementation ----------
-    // Signals the worker to stop and performs queue/callback cleanup.
-    // sync=true: also blocks until the worker thread exits (stopSync).
-    // sync=false: returns immediately after signalling (stop); worker
-    //             finishes its current task in the background and then exits.
-    Status FeatureService::doStop(bool sync) {
+    // ---------- stop ----------
+    Status FeatureService::stop(bool joinable) {
         // CAS loop: transition Running or Initializing → NotRunning.
         ServiceState old = state_.load();
         bool wasActive = false;
@@ -132,17 +128,14 @@ namespace feat {
             }
         }
 
-        // Signal the worker.
         stop_flag_.store(true);
         cv_.notify_all();
 
-        // Sync variant: wait for the worker to finish before cleanup.
-        // Also handles the case where the worker self-exited after an init failure.
-        if (sync && worker_.joinable()) worker_.join();
+        if (joinable && worker_.joinable()) worker_.join();
 
         if (!wasActive) return Status::Ok;
 
-        // --- shared: drain queue, reset tracking, emit NotRunning callback ---
+        // Drain queue, reset tracking, emit NotRunning callback.
         {
             std::lock_guard<std::mutex> lk(mtx_);
             for (Task* t : queue_) delete t;
@@ -154,12 +147,6 @@ namespace feat {
         emitRunningEvent(false); // STOPPED
         return Status::Ok;
     }
-
-    // Async stop: signal + cleanup; worker may still be finishing its current task.
-    Status FeatureService::stop()     { return doStop(false); }
-
-    // Sync stop: same as stop() but blocks until the worker thread exits.
-    Status FeatureService::stopSync() { return doStop(true);  }
 
     // ---------- submit ----------
     FeatureTicket FeatureService::submit(const std::function<void(std::vector<uint8_t>& out)>& fn)
