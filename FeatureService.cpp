@@ -8,10 +8,13 @@
 namespace feat {
 
     // ---------- ctor / dtor ----------
-    FeatureService::FeatureService(const FeatureOptions& opts,
+    FeatureService::FeatureService(FeatureCallback cb, void* cb_user,
+                                   const FeatureOptions& opts,
                                    const std::vector<IFeatureLib*>& libs,
                                    IFeatureVerifier* verifier)
-        : state_(ServiceState::NotRunning)
+        : cb_(cb)
+        , cb_user_(cb_user)
+        , state_(ServiceState::NotRunning)
         , opts_(opts)
         , libs_(libs)
         , verifier_(verifier)
@@ -49,7 +52,8 @@ namespace feat {
         ev.info      = info;
         ev.free_info = free_info;
 
-        for (size_t i = 0; i < fns.size(); ++i) fns[i](ev);
+        if (cb_) cb_(cb_user_, &ev);                          // universal catch-all first
+        for (size_t i = 0; i < fns.size(); ++i) fns[i](ev);  // then per-tag handlers
 
         if (free_info && info) free_info(info);
     }

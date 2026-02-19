@@ -57,7 +57,11 @@ namespace feat {
         size_t size;  // 0 if empty
     };
 
-    // ---------- Handler ----------
+    // ---------- Callbacks / Handlers ----------
+    // FeatureCallback: single C-style universal listener (fires for every tag).
+    typedef void(*FeatureCallback)(void* user, const FeatureEvent* ev);
+
+    // FeatureHandler: per-tag subscriber registered via on().
     typedef std::function<void(const FeatureEvent&)> FeatureHandler;
 
     // ---------- Init Options ----------
@@ -82,9 +86,11 @@ namespace feat {
     // ---------- FeatureService ----------
     class FeatureService {
     public:
-        explicit FeatureService(const FeatureOptions& opts     = FeatureOptions(),
+        explicit FeatureService(FeatureCallback cb              = nullptr,
+                                void* cb_user                  = nullptr,
+                                const FeatureOptions& opts     = FeatureOptions(),
                                 const std::vector<IFeatureLib*>& libs = std::vector<IFeatureLib*>(),
-                                IFeatureVerifier* verifier     = 0);
+                                IFeatureVerifier* verifier     = nullptr);
         ~FeatureService();
 
         FeatureService(const FeatureService&) = delete;
@@ -133,7 +139,11 @@ namespace feat {
         void workerLoop();
 
     private:
-        // handler registry: tag → ordered list of subscribers
+        // universal catch-all callback (fires for every tag before per-tag handlers)
+        FeatureCallback cb_;
+        void*           cb_user_;
+
+        // per-tag handler registry
         std::unordered_map<std::string, std::vector<FeatureHandler>> handlers_;
         std::mutex handlers_mtx_;
 
