@@ -28,13 +28,10 @@ namespace feat {
     }
 
     // ---------- on ----------
-    void FeatureService::on(const char* tag, FeatureHandlerFn fn, FeatureHandlerDel del) {
+    void FeatureService::on(const char* tag, FeatureHandlerFn fn) {
         if (!tag || !fn) return;
-        HandlerEntry e;
-        e.fn  = std::move(fn);
-        e.del = std::move(del);
         std::lock_guard<std::mutex> lk(handlers_mtx_);
-        handlers_[tag].push_back(std::move(e));
+        handlers_[tag] = std::move(fn);
     }
 
     // ---------- deleteFeatureEvent ----------
@@ -52,13 +49,7 @@ namespace feat {
                                   void* info, void(*free_info)(void*)) {
         // dispatch_table_ is frozen at start(); no lock or copy needed
         auto it = dispatch_table_.find(tag);
-        const std::vector<HandlerEntry>* fns =
-            (it != dispatch_table_.end()) ? &it->second : nullptr;
-
-        for (size_t i = 0; fns && i < fns->size(); ++i) {     // per-tag handlers: sync, non-owning
-            void* result = (*fns)[i].fn(info);
-            if (result && (*fns)[i].del) (*fns)[i].del(result);
-        }
+        if (it != dispatch_table_.end()) it->second(info);     // per-tag handler: sync, non-owning
 
         FeatureEvent* ev = new FeatureEvent();           // heap-allocated; client owns it
         ev->tag       = tag;

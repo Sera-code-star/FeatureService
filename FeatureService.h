@@ -65,10 +65,8 @@ namespace feat {
     // FeatureCallback: single C-style universal listener (fires for every tag).
     typedef void(*FeatureCallback)(void* user, const FeatureEvent* ev);
 
-    // FeatureHandlerFn:  called with type-erased info; returns a new allocation (or null).
-    // FeatureHandlerDel: frees the pointer returned by FeatureHandlerFn.
-    using FeatureHandlerFn  = std::function<void*(void*)>;
-    using FeatureHandlerDel = std::function<void(void*)>;
+    // FeatureHandlerFn: called with type-erased info; one per tag, registered via on().
+    using FeatureHandlerFn = std::function<void(void*)>;
 
     // ---------- Init Options ----------
     typedef std::unordered_map<std::string, std::string> FeatureOptions;
@@ -114,9 +112,8 @@ namespace feat {
 
         // Subscribe a handler to events with the given tag. Thread-safe.
         // Call before start() to guarantee delivery of TAG_START.
-        // fn    : receives the type-erased info ptr; return value is owned by fn.
-        // del   : frees fn's return value; skipped if fn returns null.
-        void on(const char* tag, FeatureHandlerFn fn, FeatureHandlerDel del = nullptr);
+        // One fn per tag; subsequent calls for the same tag replace the previous fn.
+        void on(const char* tag, FeatureHandlerFn fn);
 
         // State snapshot
         bool         isRunning()      const { return state_.load() == ServiceState::Running; }
@@ -152,12 +149,11 @@ namespace feat {
         void*           cb_user_;
 
         // per-tag handler registry (registration, guarded by handlers_mtx_)
-        struct HandlerEntry { FeatureHandlerFn fn; FeatureHandlerDel del; };
-        std::unordered_map<std::string, std::vector<HandlerEntry>> handlers_;
+        std::unordered_map<std::string, FeatureHandlerFn> handlers_;
         std::mutex handlers_mtx_;
 
         // read-only snapshot built once at start(); used by dispatch() with no lock
-        std::unordered_map<std::string, std::vector<HandlerEntry>> dispatch_table_;
+        std::unordered_map<std::string, FeatureHandlerFn> dispatch_table_;
 
         std::atomic<ServiceState>                state_;
         const FeatureOptions                     opts_;
