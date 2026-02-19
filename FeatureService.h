@@ -45,30 +45,29 @@ namespace feat {
     // ---------- FeatureInput ----------
     // Heap wrapper around the caller's typed input struct.
     //
-    // Build with makeInputEvt(tag, actual_input*, free_fn) and pass to submit().
+    // Build with makeInputEvt(tag, actual_input*) and pass to submit().
     //
     // Ownership:
     //   submit() success (non-zero ticket) -> service holds it; handed back via callback.
     //   submit() failure (returns 0)       -> caller must call deleteInput(p).
-    //   Callback receives it as the 4th arg; caller must call deleteInput(p) when done.
+    //   Callback receives it as the 3rd arg; caller must call deleteInput(p) when done.
     struct FeatureInput {
-        const char*       tag;     // agreed tag identifying the (input, output) type pair
-        void*             data;    // heap-allocated actual typed input struct
-        FeatureHandlerDel free_fn; // frees data; embedded so deleteInput needs no service ref
+        const char* tag;   // agreed tag identifying the (input, output) type pair
+        void*       data;  // heap-allocated actual typed input struct
     };
 
     // ---------- FeatureOutput ----------
-    // Heap-allocated result packet handed to FeatureCallback as the 3rd argument.
+    // Heap-allocated result packet handed to FeatureCallback as the 2nd argument.
     // The callback takes ownership; call deleteOutput(p) when done.
+    // deleteOutput looks up the free_output deleter via the static handler table using tag.
     //
-    // For service lifecycle events (TAG_START / TAG_STOP): data and free_fn are null.
+    // For service lifecycle events (TAG_START / TAG_STOP): data is null.
     // For task results  (status==Ok):          data is the actual_output* from biz_func.
-    // For cancelled tasks (status==Cancelled): data and free_fn are null.
+    // For cancelled tasks (status==Cancelled): data is null.
     struct FeatureOutput {
-        const char*       tag;     // submitted tag, or TAG_START/TAG_STOP for lifecycle events
-        Status            status;  // Ok or Cancelled
-        void*             data;    // heap-allocated actual typed output struct; null if none
-        FeatureHandlerDel free_fn; // frees data; null for lifecycle events
+        const char* tag;     // submitted tag, or TAG_START/TAG_STOP for lifecycle events
+        Status      status;  // Ok or Cancelled
+        void*       data;    // heap-allocated actual typed output struct; null if none
     };
 
     // ---------- Service lifecycle tags ----------
@@ -116,16 +115,16 @@ namespace feat {
     void* makeFeatureInput(const void* data, size_t size);
 
     // Step 2 — wrap featureInput* in a submit-ready FeatureInput envelope.
-    // free_fn is stored inside the envelope and called by deleteInput() on the data pointer.
     // Returns null on allocation failure.  Submit returns 0 for unregistered tags.
-    void* makeInputEvt(const char* tag, void* featureInput, FeatureHandlerDel free_fn);
+    void* makeInputEvt(const char* tag, void* featureInput);
 
-    // Release a FeatureInput: calls fi->free_fn(fi->data) if set, then frees the envelope.
-    // Safe to call with null.
+    // Release a FeatureInput: looks up free_input in the static handler table by tag,
+    // calls it on fi->data, then frees the envelope.  Safe to call with null.
     void deleteInput(void* input);
 
-    // Release a FeatureOutput: calls fo->free_fn(fo->data) if set, then deletes the envelope.
-    // Safe to call with null; no-op data-free for lifecycle outputs (free_fn is null).
+    // Release a FeatureOutput: looks up free_output in the static handler table by tag,
+    // calls it on fo->data, then deletes the envelope.  Safe to call with null;
+    // no-op data-free for lifecycle outputs whose tags are absent from the table.
     void deleteOutput(void* output);
 
     // ---------- FeatureService ----------
@@ -144,11 +143,18 @@ namespace feat {
         Status start();
         Status stop(bool join = false);
 
+        // Per-tag handler record.  Public so deleteInput/deleteOutput can name the type
+        // when accessing the static handler table.
+        struct HandlerEntry {
+            FeatureHandlerFn  biz_func;
+            FeatureHandlerDel free_input;
+            FeatureHandlerDel free_output;
+        };
+
         // Register a handler for tag. Thread-safe; call before start().
         //   biz_func(actual_input*)  -> actual_output* (heap-allocated)
         //   free_input(actual_input*) frees the input after biz_func returns
-        //   free_output(actual_output*) is embedded in FeatureOutput so the caller
-        //     can free it via deleteFeatureOutput()
+        //   free_output(actual_output*) freed by deleteOutput() via the static table
         void on(const char* tag,
                 FeatureHandlerFn  biz_func,
                 FeatureHandlerDel free_input,
@@ -180,11 +186,15 @@ namespace feat {
         long long   getLongLongOr(const std::string& key, long long fallback) const;
         double      getDoubleOr(const std::string& key, double fallback) const;
 
+        // Global helpers access the static handler table.
+        friend void deleteInput(void* input);
+        friend void deleteOutput(void* output);
+
     private:
         // Unified output-build and callback-fire.
-        // t==nullptr → service event: ticket=0, tag=tag, data=null, free_fn=null, input=null.
+        // t==nullptr → service event: ticket=0, tag=tag, data=null, input=null.
         // t!=nullptr → task result:   ticket=t->id, tag from t->input->tag,
-        //                             biz_func called if status==Ok; free_output embedded in out.
+        //                             biz_func called if status==Ok.
         // cb_ is always valid; callback owns output and input; service only deletes Task entities.
         void dispatch(Task* t, const char* tag, Status status);
 
@@ -200,15 +210,10 @@ namespace feat {
     private:
         FeatureCallback cb_;
 
-        // per-tag handler registry; written only before start(), read-only after.
-        // No lock is taken in dispatch() or submit() — on() is pre-start-only.
-        struct HandlerEntry {
-            FeatureHandlerFn  biz_func;
-            FeatureHandlerDel free_input;
-            FeatureHandlerDel free_output;
-        };
-        std::unordered_map<std::string, HandlerEntry> handlers_;
-        std::mutex handlers_mtx_;  // guards concurrent on() calls before start()
+        // Shared across all instances; cleared by stop().
+        // Written only before start() (on()); read lock-free by dispatch()/submit() after.
+        static std::unordered_map<std::string, HandlerEntry> handlers_;
+        static std::mutex handlers_mtx_;  // guards concurrent on() calls before start()
 
         std::atomic<ServiceState>                state_;
         const FeatureOptions                     opts_;

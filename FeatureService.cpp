@@ -7,22 +7,31 @@
 
 namespace feat {
 
+    // ---------- static member definitions ----------
+    std::unordered_map<std::string, FeatureService::HandlerEntry> FeatureService::handlers_;
+    std::mutex FeatureService::handlers_mtx_;
+
     // ---------- deleteInput ----------
-    // Global: free_fn is embedded in the envelope; no service reference needed.
+    // Global: looks up free_input via the static handler table, calls it on fi->data,
+    // then frees the envelope.  No-op data-free if tag is absent (lifecycle events).
     void deleteInput(void* p) {
         FeatureInput* fi = static_cast<FeatureInput*>(p);
         if (!fi) return;
-        if (fi->free_fn && fi->data) fi->free_fn(fi->data);
+        auto it = FeatureService::handlers_.find(fi->tag);
+        if (it != FeatureService::handlers_.end() && it->second.free_input && fi->data)
+            it->second.free_input(fi->data);
         std::free(fi);
     }
 
     // ---------- deleteOutput ----------
-    // Global: free_fn is embedded in the envelope; no service reference needed.
-    // No-op data-free for lifecycle outputs (free_fn is null, data is null).
+    // Global: looks up free_output via the static handler table, calls it on fo->data,
+    // then deletes the envelope.  No-op data-free for lifecycle outputs (tag absent).
     void deleteOutput(void* p) {
         FeatureOutput* fo = static_cast<FeatureOutput*>(p);
         if (!fo) return;
-        if (fo->free_fn && fo->data) fo->free_fn(fo->data);
+        auto it = FeatureService::handlers_.find(fo->tag);
+        if (it != FeatureService::handlers_.end() && it->second.free_output && fo->data)
+            it->second.free_output(fo->data);
         delete fo;
     }
 
@@ -68,15 +77,13 @@ namespace feat {
 
     // ---------- makeInputEvt ----------
     // Global: wraps featureInput* + tag in a malloc'd FeatureInput envelope for submit().
-    // free_fn is stored in the envelope; called by deleteInput() on the data pointer.
     // Tag validation happens in submit() (returns 0 for unregistered tags).
-    void* makeInputEvt(const char* tag, void* featureInput, FeatureHandlerDel free_fn) {
+    void* makeInputEvt(const char* tag, void* featureInput) {
         if (!tag) return nullptr;
         FeatureInput* fi = static_cast<FeatureInput*>(std::malloc(sizeof(FeatureInput)));
         if (!fi) return nullptr;
-        fi->tag     = tag;
-        fi->data    = featureInput;
-        fi->free_fn = free_fn;
+        fi->tag  = tag;
+        fi->data = featureInput;
         return static_cast<void*>(fi);
     }
 
@@ -84,33 +91,27 @@ namespace feat {
     // Unified output-build and callback-fire for both service events and task results.
     //
     // Service event (t == nullptr):
-    //   ticket=0, tag=tag, status=Ok, data=null, free_fn=null, input=null.
+    //   ticket=0, tag=tag, status=Ok, data=null, input=null.
     //
     // Task result (t != nullptr):
     //   ticket=t->id, tag=t->input->tag; calls t->biz_func(input->data) if status==Ok.
-    //   Embeds free_output into out->free_fn so deleteOutput() needs no service reference.
     //   Sets t->input=nullptr after firing; does NOT delete t — caller (service) does.
     //
-    // The service only deletes Task entities; input/output lifetimes are managed by the
-    // global deleteInput/deleteOutput using the free_fn embedded in each envelope.
+    // The service only deletes Task entities; deleteInput/deleteOutput look up
+    // the static handler table to free input/output data.
     void FeatureService::dispatch(Task* t, const char* tag, Status status) {
-        FeatureTicket     ticket      = t ? t->id         : 0;
-        const char*       out_tag     = t ? t->input->tag : tag;
-        void*             input       = t ? static_cast<void*>(t->input) : nullptr;
-        void*             out_data    = nullptr;
-        FeatureHandlerDel out_free_fn = nullptr;
+        FeatureTicket ticket  = t ? t->id         : 0;
+        const char*   out_tag = t ? t->input->tag : tag;
+        void*         input   = t ? static_cast<void*>(t->input) : nullptr;
+        void*         out_data = nullptr;
 
-        if (t && status == Status::Ok) {
+        if (t && status == Status::Ok)
             out_data = t->biz_func(t->input->data);  // actual_input* -> actual_output*
-            auto it = handlers_.find(t->input->tag);  // read-only after start(); no lock
-            if (it != handlers_.end()) out_free_fn = it->second.free_output;
-        }
 
         FeatureOutput* out = new FeatureOutput();
-        out->tag     = out_tag;
-        out->status  = status;
-        out->data    = out_data;
-        out->free_fn = out_free_fn;  // embedded so deleteOutput needs no service ref
+        out->tag    = out_tag;
+        out->status = status;
+        out->data   = out_data;
 
         cb_(ticket, static_cast<void*>(out), input);
 
@@ -234,6 +235,10 @@ namespace feat {
         authKeywords_.clear();
 
         if (!join) dispatch(nullptr, TAG_STOP, Status::Ok);
+
+        // Clear the static handler table now that all callbacks have fired.
+        std::lock_guard<std::mutex> lk(handlers_mtx_);
+        handlers_.clear();
         return Status::Ok;
     }
 
