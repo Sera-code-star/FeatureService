@@ -87,43 +87,40 @@ namespace feat {
         return static_cast<void*>(fi);
     }
 
-    // ---------- dispatchServiceEvent ----------
-    // Fires TAG_START or TAG_STOP: ticket=0, output{tag,Ok,null}, input=null.
-    void FeatureService::dispatchServiceEvent(const char* tag) {
-        FeatureOutput* out = new FeatureOutput();
-        out->tag    = tag;
-        out->status = Status::Ok;
-        out->data   = nullptr;
-        if (cb_) cb_(0, static_cast<void*>(out), nullptr);
-        else     deleteOutput(static_cast<void*>(out));
-    }
+    // ---------- dispatch ----------
+    // Unified output-build and callback-fire for both service events and task results.
+    //
+    // Service event (t == nullptr):
+    //   ticket=0, tag=tag, status=Ok, data=null, input=null.
+    //
+    // Task result (t != nullptr):
+    //   ticket=t->id, tag=t->input->tag; calls t->biz_func(input->data) if status==Ok.
+    //   Sets t->input=nullptr after firing; does NOT delete t — caller is responsible.
+    //
+    // In both cases the callback owns output and input; service frees neither.
+    // If no callback is registered the service cleans up to avoid leaks.
+    void FeatureService::dispatch(Task* t, const char* tag, Status status) {
+        FeatureTicket  ticket   = t ? t->id         : 0;
+        const char*    out_tag  = t ? t->input->tag : tag;
+        void*          input    = t ? static_cast<void*>(t->input) : nullptr;
+        void*          out_data = nullptr;
 
-    // ---------- dispatchTask ----------
-    // If status==Ok:        calls t->biz_func(t->input->data) -> actual_output*.
-    // If status==Cancelled: skips biz_func; out->data is null.
-    // Fires cb_(user, ticket, output, input) — service does NOT free either ptr.
-    // The callback owns both; it must call svc.deleteOutput(output) and
-    // svc.deleteInput(input) when done.  Does NOT delete t; caller owns t.
-    void FeatureService::dispatchTask(Task* t, Status status) {
-        void* out_data = nullptr;
-        if (status == Status::Ok)
+        if (t && status == Status::Ok)
             out_data = t->biz_func(t->input->data);  // actual_input* -> actual_output*
 
         FeatureOutput* out = new FeatureOutput();
-        out->tag    = t->input->tag;
+        out->tag    = out_tag;
         out->status = status;
         out->data   = out_data;
 
-        // Pass both output and original input to the callback.
-        // Service does NOT free either; client calls deleteInput / deleteOutput.
         if (cb_) {
-            cb_(t->id, static_cast<void*>(out), static_cast<void*>(t->input));
+            cb_(ticket, static_cast<void*>(out), input);
         } else {
-            // No callback registered: avoid leaks by cleaning up ourselves.
             deleteOutput(static_cast<void*>(out));
-            deleteInput(static_cast<void*>(t->input));
+            if (input) deleteInput(input);
         }
-        t->input = nullptr;  // ownership transferred; guard against double-use
+
+        if (t) t->input = nullptr;  // ownership transferred; guard against double-use
     }
 
     // ---------- start ----------
@@ -149,7 +146,7 @@ namespace feat {
                 if (!libs_[i]) {
                     ServiceState exp = ServiceState::Initializing;
                     if (state_.compare_exchange_strong(exp, ServiceState::NotRunning)) {
-                        dispatchServiceEvent(TAG_STOP);
+                        dispatch(nullptr, TAG_STOP, Status::Ok);
                         stop_flag_.store(true);
                     }
                     return;
@@ -163,7 +160,7 @@ namespace feat {
                     ServiceState exp = ServiceState::Initializing;
                     if (state_.compare_exchange_strong(exp, ServiceState::NotRunning)) {
                         authKeywords_.clear();
-                        dispatchServiceEvent(TAG_STOP);
+                        dispatch(nullptr, TAG_STOP, Status::Ok);
                         stop_flag_.store(true);
                     }
                     return;
@@ -184,7 +181,7 @@ namespace feat {
                 authKeywords_.clear();
                 return;
             }
-            dispatchServiceEvent(TAG_START);
+            dispatch(nullptr, TAG_START, Status::Ok);
         };
 
         {
@@ -238,12 +235,12 @@ namespace feat {
             current_ = nullptr;
         }
         for (Task* t : pending) {
-            dispatchTask(t, Status::Cancelled);  // fires callback; client gets input back
+            dispatch(t, nullptr, Status::Cancelled);  // fires callback; client gets input back
             delete t;
         }
         authKeywords_.clear();
 
-        if (!join) dispatchServiceEvent(TAG_STOP);
+        if (!join) dispatch(nullptr, TAG_STOP, Status::Ok);
         return Status::Ok;
     }
 
@@ -306,7 +303,7 @@ namespace feat {
 
         if (found) {
             // Fire Cancelled callback; client receives original input back and frees it.
-            dispatchTask(found, Status::Cancelled);
+            dispatch(found, nullptr, Status::Cancelled);
             delete found;
         }
         return Status::Ok;
@@ -331,9 +328,8 @@ namespace feat {
             } else {
                 FeatureTicket id = t->id;
 
-                // biz_func and raw_input already resolved at submit() time;
-                // dispatchTask calls t->biz_func(t->raw_input), frees raw_input, fires cb_.
-                dispatchTask(t, Status::Ok);
+                // biz_func resolved at submit() time; dispatch calls it and fires cb_.
+                dispatch(t, nullptr, Status::Ok);
 
                 {
                     std::lock_guard<std::mutex> lk(mtx_);

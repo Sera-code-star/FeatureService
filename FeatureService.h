@@ -175,14 +175,12 @@ namespace feat {
         double      getDoubleOr(const std::string& key, double fallback) const;
 
     private:
-        // Build and fire a FeatureOutput for a service lifecycle event (TAG_START/TAG_STOP).
-        // ticket=0, data=null, status=Ok.
-        void dispatchServiceEvent(const char* tag);
-
-        // Call t->biz_func(t->input->data) if status==Ok, build FeatureOutput,
-        // then fire cb_(user, ticket, output, input).  The callback owns both;
-        // service frees neither.  Does NOT delete t; caller is responsible.
-        void dispatchTask(Task* t, Status status);
+        // Unified output-build and callback-fire.
+        // t==nullptr → service event: ticket=0, tag=tag, data=null, input=null.
+        // t!=nullptr → task result:   ticket=t->id, tag from t->input->tag,
+        //                             biz_func called if status==Ok.
+        // Callback owns output and input; service frees neither.
+        void dispatch(Task* t, const char* tag, Status status);
 
         // Parsing helpers
         static bool       parseBool(const std::string& s, bool* ok);
@@ -205,7 +203,7 @@ namespace feat {
         std::unordered_map<std::string, HandlerEntry> handlers_;
         std::mutex handlers_mtx_;
 
-        // read-only snapshot built once at start(); used by dispatchTask() with no lock
+        // read-only snapshot built once at start(); used by dispatch() with no lock
         std::unordered_map<std::string, HandlerEntry> dispatch_table_;
 
         std::atomic<ServiceState>                state_;
