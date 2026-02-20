@@ -156,7 +156,9 @@ namespace feat {
         initTask->id       = 0;
         initTask->internal = true;
         initTask->fn = [this](void*) -> void* {
-            // Phase 1: null-guard all registered libs
+            // Each entry in tagLibMap_ is a lib instance produced by that lower-lib's
+            // create() factory.  Phase 1 verifies every create() succeeded (non-null)
+            // before we attempt any initialisation.
             for (auto& kv : tagLibMap_) {
                 if (!kv.second) {
                     ServiceState exp = ServiceState::Initializing;
@@ -168,7 +170,9 @@ namespace feat {
                 }
             }
 
-            // Phase 2: init each unique lib, collect keywords
+            // Phase 2: call lib->init(opts_) on each unique instance, then collect the
+            // tags (keywords) it owns.  tagLibMap_ was pre-populated by setTagLib() so
+            // each tag is already bound to its lib instance; init just resets/readies it.
             std::vector<void*> seen;
             for (auto& kv : tagLibMap_) {
                 if (std::find(seen.begin(), seen.end(), kv.second) != seen.end()) continue;
@@ -184,6 +188,8 @@ namespace feat {
                     }
                     return nullptr;
                 }
+                // Collect the tags this lib instance handles into authKeywords_ so the
+                // verifier can authorise incoming requests against the full keyword set.
                 std::vector<std::string> kw = lib->getKeywords();
                 for (size_t j = 0; j < kw.size(); ++j) authKeywords_.push_back(kw[j]);
             }
