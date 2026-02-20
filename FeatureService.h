@@ -135,9 +135,8 @@ namespace feat {
     class FeatureService {
     public:
         explicit FeatureService(FeatureCallback cb,
-                                const FeatureOptions& opts     = FeatureOptions(),
-                                const std::vector<IFeatureLib*>& libs = std::vector<IFeatureLib*>(),
-                                IFeatureVerifier* verifier     = nullptr);
+                                const FeatureOptions& opts = FeatureOptions(),
+                                IFeatureVerifier* verifier = nullptr);
         ~FeatureService();
 
         FeatureService(const FeatureService&) = delete;
@@ -220,14 +219,14 @@ namespace feat {
     private:
         FeatureCallback cb_;
 
-        // Shared across all instances; cleared by stop().
-        // Written only before start() (on()); read lock-free by dispatch()/submit() after.
+        // Shared across all instances; never cleared (handlers are permanent for the
+        // lifetime of the service object).
+        // Written by on(); read lock-free by dispatch()/submit() after start().
         static std::unordered_map<std::string, HandlerEntry> handlers_;
-        static std::mutex handlers_mtx_;  // guards concurrent on() calls before start()
+        static std::mutex handlers_mtx_;  // guards concurrent on() calls
 
         std::atomic<ServiceState>                state_;
         const FeatureOptions                     opts_;
-        std::vector<IFeatureLib*>                libs_;
         std::unordered_map<std::string, void*>   tagLibMap_;  // tag -> IFeatureLib* (void-erased)
         IFeatureVerifier*                        verifier_;
         std::vector<std::string>                 authKeywords_;

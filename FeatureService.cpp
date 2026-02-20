@@ -38,12 +38,10 @@ namespace feat {
     // ---------- ctor / dtor ----------
     FeatureService::FeatureService(FeatureCallback cb,
                                    const FeatureOptions& opts,
-                                   const std::vector<IFeatureLib*>& libs,
                                    IFeatureVerifier* verifier)
         : cb_(cb)
         , state_(ServiceState::NotRunning)
         , opts_(opts)
-        , libs_(libs)
         , verifier_(verifier)
         , next_ticket_(1)
         , stop_flag_(false)
@@ -158,9 +156,9 @@ namespace feat {
         initTask->id       = 0;
         initTask->internal = true;
         initTask->fn = [this](void*) -> void* {
-            // Phase 1: null-guard all libs
-            for (size_t i = 0; i < libs_.size(); ++i) {
-                if (!libs_[i]) {
+            // Phase 1: null-guard all registered libs
+            for (auto& kv : tagLibMap_) {
+                if (!kv.second) {
                     ServiceState exp = ServiceState::Initializing;
                     if (state_.compare_exchange_strong(exp, ServiceState::NotRunning)) {
                         dispatch(nullptr, TAG_STOP, Status::Ok);
@@ -170,10 +168,14 @@ namespace feat {
                 }
             }
 
-            // Phase 2: init all libs, collect keywords
-            for (size_t i = 0; i < libs_.size(); ++i) {
+            // Phase 2: init each unique lib, collect keywords
+            std::vector<void*> seen;
+            for (auto& kv : tagLibMap_) {
+                if (std::find(seen.begin(), seen.end(), kv.second) != seen.end()) continue;
+                seen.push_back(kv.second);
                 if (stop_flag_.load()) { authKeywords_.clear(); return nullptr; }
-                if (!libs_[i]->init(opts_)) {
+                IFeatureLib* lib = static_cast<IFeatureLib*>(kv.second);
+                if (!lib->init(opts_)) {
                     ServiceState exp = ServiceState::Initializing;
                     if (state_.compare_exchange_strong(exp, ServiceState::NotRunning)) {
                         authKeywords_.clear();
@@ -182,7 +184,7 @@ namespace feat {
                     }
                     return nullptr;
                 }
-                std::vector<std::string> kw = libs_[i]->getKeywords();
+                std::vector<std::string> kw = lib->getKeywords();
                 for (size_t j = 0; j < kw.size(); ++j) authKeywords_.push_back(kw[j]);
             }
 
