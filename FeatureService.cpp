@@ -64,6 +64,16 @@ namespace feat {
         handlers_[tag] = { biz_func, free_input, free_output };
     }
 
+    // ---------- setTagLib ----------
+    // Associates an IFeatureLib* (passed as void* to avoid an extra cast at the call site)
+    // with a tag.  workerLoop() consults tagLibMap_ to inject the exit flag only into
+    // the lib that owns the given tag, rather than broadcasting to every lib.
+    // Must be called before start().
+    void FeatureService::setTagLib(const char* tag, void* lib) {
+        if (!tag || !lib) return;
+        tagLibMap_[tag] = lib;
+    }
+
     // ---------- makeFeatureInput ----------
     // Global: allocates a malloc'd copy of data[0..size). The caller passes this to
     // makeInputEvt() as the featureInput argument, or frees it with std::free().
@@ -340,15 +350,21 @@ namespace feat {
             }
 
             FeatureTicket id = t->id;
-            if (!t->internal)
-                for (size_t i = 0; i < libs_.size(); ++i)
-                    libs_[i]->inject(&t->exitFlag);
+
+            // Resolve which lib handles this task's tag before dispatch() clears t->input.
+            // Falls back to nullptr (no injection) if the tag has no registered lib.
+            IFeatureLib* taskLib = nullptr;
+            if (!t->internal) {
+                auto it = tagLibMap_.find(t->input->tag);
+                if (it != tagLibMap_.end())
+                    taskLib = static_cast<IFeatureLib*>(it->second);
+            }
+
+            if (taskLib) taskLib->inject(&t->exitFlag);
 
             dispatch(t, nullptr, Status::Ok);
 
-            if (!t->internal)
-                for (size_t i = 0; i < libs_.size(); ++i)
-                    libs_[i]->inject(nullptr);   // release pointer before Task is deleted
+            if (taskLib) taskLib->inject(nullptr);   // release pointer before Task is deleted
 
             {
                 std::lock_guard<std::mutex> lk(mtx_);

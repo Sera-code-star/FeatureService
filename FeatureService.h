@@ -164,6 +164,11 @@ namespace feat {
                 FeatureHandlerDel free_input,
                 FeatureHandlerDel free_output);
 
+        // Associate a lib instance (IFeatureLib* cast to void*) with a tag so that
+        // workerLoop() calls inject() only on that lib when executing a task for tag.
+        // Call before start().
+        void setTagLib(const char* tag, void* lib);
+
         // Submit a task.
         // input must be a FeatureInput* (from makeInputEvt()) cast to void*.
         // On success (non-zero ticket): service holds input until the callback fires,
@@ -223,6 +228,7 @@ namespace feat {
         std::atomic<ServiceState>                state_;
         const FeatureOptions                     opts_;
         std::vector<IFeatureLib*>                libs_;
+        std::unordered_map<std::string, void*>   tagLibMap_;  // tag -> IFeatureLib* (void-erased)
         IFeatureVerifier*                        verifier_;
         std::vector<std::string>                 authKeywords_;
 
