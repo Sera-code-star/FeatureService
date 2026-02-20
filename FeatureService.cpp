@@ -261,9 +261,6 @@ namespace feat {
 
         if (!join) dispatch(nullptr, TAG_STOP, Status::Ok);
 
-        // Clear the static handler table now that all callbacks have fired.
-        std::lock_guard<std::mutex> lk(handlers_mtx_);
-        handlers_.clear();
         return Status::Ok;
     }
 
