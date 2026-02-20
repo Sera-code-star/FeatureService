@@ -108,7 +108,7 @@ namespace feat {
     //
     // User task (t->internal == false):
     //   ticket=t->id, tag=t->input->tag; calls t->fn(input->data) if status==Ok.
-    //   Sets t->input=nullptr after firing; does NOT delete t — caller (service) does.
+    //   Does NOT delete t — caller (service) does.
     //
     // The service only deletes Task entities; deleteInput/deleteOutput look up
     // the static handler table to free input/output data.
@@ -139,8 +139,6 @@ namespace feat {
         out->data   = out_data;
 
         cb_(ticket, static_cast<void*>(out), input);
-
-        if (t) t->input = nullptr;  // ownership transferred; guard against double-use
     }
 
     // ---------- start ----------
