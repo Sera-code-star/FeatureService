@@ -200,9 +200,10 @@ namespace feat {
             //   tag     – routing key (c-string)
             //   bind    – wraps the lib instance as implicit this; produces biz_func
             //   nullptr – no pre-filter
-            //   deleter – must be a static member function or non-member function
-            //             (i.e. a plain function pointer, NOT a bound instance method)
-            //             so the framework can store/call it without a captured context.
+            //   deleter – must be a static class function (e.g. MyLib::deleteOutput)
+            //             or a global function exported from the lib (e.g. mylib_delete).
+            //             Do NOT use outputDeleter() (a virtual instance method);
+            //             the framework stores a raw function pointer with no captured context.
             for (auto& kv : tagToLib) {
                 IFeatureLib* lib = kv.second;
                 on(kv.first.c_str(),
