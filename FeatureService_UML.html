@@ -118,16 +118,18 @@ sequenceDiagram
     FS-->>W: cv_.notify_one()
     FS-->>C: return ticket
 
-    W->>W: dequeue Task
-    W->>L: inject(&exitFlag)
-    W->>FS: dispatch(t, Ok)
-    FS->>L: fn(input->data) → output*
-    L-->>FS: actual_output*
-    FS->>FS: build FeatureOutput
-    FS-->>C: callback(ticket, output, input)
+    W->>W: cv_.wait → dequeue Task
+    W->>L: taskLib->inject(&exitFlag)
+    Note over W: dispatch(t, nullptr, Ok) runs inside workerLoop
+    activate W
+    W->>L: fn(input->data) [= IFeatureLib::biz]
+    L-->>W: actual_output*
+    W->>W: build FeatureOutput{tag, Ok, data}
+    W-->>C: cb_(ticket, output*, input*)
+    deactivate W
     C->>FS: deleteOutput(output)
     C->>FS: deleteInput(input)
-    W->>L: inject(nullptr)
+    W->>L: taskLib->inject(nullptr)
     W->>W: tasks_.erase(id) / delete Task
   </div>
 
