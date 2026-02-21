@@ -196,10 +196,13 @@ namespace feat {
             if (stop_flag_.load()) { authKeywords_.clear(); return nullptr; }
 
             // ── Phase 3: register each tag via on() ──────────────────────────────
-            // std::bind binds the lib instance as the implicit this-pointer, producing
-            // a std::function<void*(void*)> stored in HandlerEntry::biz_func.
-            // lib->outputDeleter() supplies the c-style deleter for the void* output.
-            // tagLibMap_ is populated here so workerLoop() can call inject() per tag.
+            // on(tag, std::bind(&IFeatureLib::biz, instance, _1), nullptr, deleter)
+            //   tag     – routing key (c-string)
+            //   bind    – wraps the lib instance as implicit this; produces biz_func
+            //   nullptr – no pre-filter
+            //   deleter – must be a static member function or non-member function
+            //             (i.e. a plain function pointer, NOT a bound instance method)
+            //             so the framework can store/call it without a captured context.
             for (auto& kv : tagToLib) {
                 IFeatureLib* lib = kv.second;
                 on(kv.first.c_str(),
