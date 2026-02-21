@@ -54,22 +54,12 @@ namespace feat {
 
     // ---------- on ----------
     void FeatureService::on(const char* tag,
-                            FeatureHandlerFn  biz_func,
+                            std::function<void*(void*)> biz_func,
                             FeatureHandlerDel free_input,
                             FeatureHandlerDel free_output) {
         if (!tag || !biz_func) return;
         std::lock_guard<std::mutex> lk(handlers_mtx_);
-        handlers_[tag] = { biz_func, free_input, free_output };
-    }
-
-    // ---------- setTagLib ----------
-    // Associates an IFeatureLib* (passed as void* to avoid an extra cast at the call site)
-    // with a tag.  workerLoop() consults tagLibMap_ to inject the exit flag only into
-    // the lib that owns the given tag, rather than broadcasting to every lib.
-    // Must be called before start().
-    void FeatureService::setTagLib(const char* tag, void* lib) {
-        if (!tag || !lib) return;
-        tagLibMap_[tag] = lib;
+        handlers_[tag] = { std::move(biz_func), free_input, free_output };
     }
 
     // ---------- makeFeatureInput ----------
@@ -140,6 +130,11 @@ namespace feat {
     }
 
     // ---------- start ----------
+    // Total number of hard-coded IFeatureLib instances the service owns.
+    // Increment this and add the matching instance construction inside the
+    // init lambda below whenever a new feature library is integrated.
+#define FEATURE_LIB_COUNT 0
+
     Status FeatureService::start() {
         ServiceState expected = ServiceState::NotRunning;
         if (!state_.compare_exchange_strong(expected, ServiceState::Initializing))
@@ -156,30 +151,18 @@ namespace feat {
         initTask->id       = 0;
         initTask->internal = true;
         initTask->fn = [this](void*) -> void* {
-            // Each entry in tagLibMap_ is a lib instance produced by that lower-lib's
-            // create() factory.  Phase 1 verifies every create() succeeded (non-null)
-            // before we attempt any initialisation.
-            for (auto& kv : tagLibMap_) {
-                if (!kv.second) {
-                    ServiceState exp = ServiceState::Initializing;
-                    if (state_.compare_exchange_strong(exp, ServiceState::NotRunning)) {
-                        dispatch(nullptr, TAG_STOP, Status::Ok);
-                        stop_flag_.store(true);
-                    }
-                    return nullptr;
-                }
-            }
+            // ── Hard-coded lib instances (FEATURE_LIB_COUNT above) ───────────────
+            // Add one IFeatureLib* per feature domain and increment FEATURE_LIB_COUNT.
+            // Example:
+            //   IFeatureLib* libs[] = { new ConcreteLib(), new OtherLib() };
+            std::vector<IFeatureLib*> libs = {
+                /* new ConcreteLib(), */
+            };
 
-            // Phase 2: call lib->init(opts_) on each unique instance, then collect the
-            // tags (keywords) it owns.  tagLibMap_ was pre-populated by setTagLib() so
-            // each tag is already bound to its lib instance; init just resets/readies it.
-            std::vector<void*> seen;
-            for (auto& kv : tagLibMap_) {
-                if (std::find(seen.begin(), seen.end(), kv.second) != seen.end()) continue;
-                seen.push_back(kv.second);
+            // ── Phase 1: init each lib instance ──────────────────────────────────
+            for (size_t i = 0; i < libs.size(); ++i) {
                 if (stop_flag_.load()) { authKeywords_.clear(); return nullptr; }
-                IFeatureLib* lib = static_cast<IFeatureLib*>(kv.second);
-                if (!lib->init(opts_)) {
+                if (!libs[i]->init(opts_)) {
                     ServiceState exp = ServiceState::Initializing;
                     if (state_.compare_exchange_strong(exp, ServiceState::NotRunning)) {
                         authKeywords_.clear();
@@ -188,19 +171,47 @@ namespace feat {
                     }
                     return nullptr;
                 }
-                // Collect the tags this lib instance handles into authKeywords_ so the
-                // verifier can authorise incoming requests against the full keyword set.
-                std::vector<std::string> kw = lib->getKeywords();
-                for (size_t j = 0; j < kw.size(); ++j) authKeywords_.push_back(kw[j]);
+            }
+
+            // ── Phase 2: collect tags per lib; sets must be disjoint ─────────────
+            // tagToLib maps each keyword -> its owning lib; overlap is a config error.
+            std::unordered_map<std::string, IFeatureLib*> tagToLib;
+            for (size_t i = 0; i < libs.size(); ++i) {
+                std::vector<std::string> kw = libs[i]->getKeywords();
+                for (size_t j = 0; j < kw.size(); ++j) {
+                    if (tagToLib.count(kw[j])) {
+                        ServiceState exp = ServiceState::Initializing;
+                        if (state_.compare_exchange_strong(exp, ServiceState::NotRunning)) {
+                            authKeywords_.clear();
+                            dispatch(nullptr, TAG_STOP, Status::Ok);
+                            stop_flag_.store(true);
+                        }
+                        return nullptr;
+                    }
+                    tagToLib[kw[j]] = libs[i];
+                    authKeywords_.push_back(kw[j]);
+                }
             }
 
             if (stop_flag_.load()) { authKeywords_.clear(); return nullptr; }
 
-            std::sort(authKeywords_.begin(), authKeywords_.end());
-            authKeywords_.erase(std::unique(authKeywords_.begin(), authKeywords_.end()),
-                                authKeywords_.end());
+            // ── Phase 3: register each tag via on() ──────────────────────────────
+            // std::bind binds the lib instance as the implicit this-pointer, producing
+            // a std::function<void*(void*)> stored in HandlerEntry::biz_func.
+            // lib->outputDeleter() supplies the c-style deleter for the void* output.
+            // tagLibMap_ is populated here so workerLoop() can call inject() per tag.
+            for (auto& kv : tagToLib) {
+                IFeatureLib* lib = kv.second;
+                on(kv.first.c_str(),
+                   std::bind(&IFeatureLib::biz, lib, std::placeholders::_1),
+                   nullptr,
+                   lib->outputDeleter());
+                tagLibMap_[kv.first] = lib;
+            }
 
-            // Phase 3: transition to Running
+            std::sort(authKeywords_.begin(), authKeywords_.end());
+
+            // ── Phase 4: transition to Running ───────────────────────────────────
             ServiceState exp = ServiceState::Initializing;
             if (!state_.compare_exchange_strong(exp, ServiceState::Running)) {
                 authKeywords_.clear();

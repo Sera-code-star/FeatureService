@@ -35,6 +35,14 @@ public:
         return keywords_;
     }
 
+    void inject(std::atomic<char>* flag) override { (void)flag; }
+
+    // Returns nullptr by default; tests needing real processing should subclass.
+    void* biz(void*) override { return nullptr; }
+
+    // No output allocation, so no deleter needed.
+    FeatureHandlerDel outputDeleter() const override { return nullptr; }
+
     // Test accessors
     bool                initCalled() const { return initCalled_; }
     const FeatureOptions& lastOpts() const { return lastOpts_;   }

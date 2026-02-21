@@ -101,6 +101,13 @@ namespace feat {
         // during processing and aborts early if it reads non-zero.
         // Called again with nullptr after the task completes to clear the reference.
         virtual void inject(std::atomic<char>* flag) = 0;
+        // Business function: actual_input* -> heap-allocated actual_output*.
+        // The init lambda binds a specific instance to this via std::bind so that
+        // each tag's handler entry carries the right this-pointer automatically.
+        virtual void* biz(void* input) = 0;
+        // C-style deleter for the heap-allocated actual_output* returned by biz().
+        // Stored in HandlerEntry::free_output; called by deleteOutput() to free data.
+        virtual FeatureHandlerDel outputDeleter() const = 0;
     };
 
     // ---------- Authorization verifier interface ----------
@@ -148,25 +155,26 @@ namespace feat {
 
         // Per-tag handler record.  Public so deleteInput/deleteOutput can name the type
         // when accessing the static handler table.
+        //
+        //   biz_func    — std::function<void*(void*)>; holds either a plain function pointer
+        //                 (external registration) or a std::bind result that carries the lib
+        //                 instance as its implicit this-pointer (init-lambda registration).
+        //   free_input  — c-style deleter for actual_input*; may be nullptr.
+        //   free_output — c-style deleter for the void* returned by biz_func; always set for
+        //                 lib-bound entries (from IFeatureLib::outputDeleter()).
         struct HandlerEntry {
-            FeatureHandlerFn  biz_func;
-            FeatureHandlerDel free_input;
-            FeatureHandlerDel free_output;
+            std::function<void*(void*)> biz_func;
+            FeatureHandlerDel           free_input;
+            FeatureHandlerDel           free_output;  // c-style output deleter: void(*)(void*)
         };
 
         // Register a handler for tag. Thread-safe; call before start().
-        //   biz_func(actual_input*)  -> actual_output* (heap-allocated)
-        //   free_input(actual_input*) frees the input after biz_func returns
-        //   free_output(actual_output*) freed by deleteOutput() via the static table
+        //   biz_func accepts any callable convertible to std::function<void*(void*)>,
+        //   including plain function pointers and std::bind expressions.
         void on(const char* tag,
-                FeatureHandlerFn  biz_func,
+                std::function<void*(void*)> biz_func,
                 FeatureHandlerDel free_input,
                 FeatureHandlerDel free_output);
-
-        // Associate a lib instance (IFeatureLib* cast to void*) with a tag so that
-        // workerLoop() calls inject() only on that lib when executing a task for tag.
-        // Call before start().
-        void setTagLib(const char* tag, void* lib);
 
         // Submit a task.
         // input must be a FeatureInput* (from makeInputEvt()) cast to void*.
