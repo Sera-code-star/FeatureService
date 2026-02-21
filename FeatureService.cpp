@@ -196,22 +196,19 @@ namespace feat {
             if (stop_flag_.load()) { authKeywords_.clear(); return nullptr; }
 
             // ── Phase 3: register each tag via on() ──────────────────────────────
-            // on(tag, std::bind(&IFeatureLib::biz, instance, _1), nullptr, deleter)
-            //   tag     – routing key (c-string)
-            //   bind    – wraps the lib instance as implicit this; produces biz_func
+            // Hard-code one on() call per tag. Do NOT drive this from tagToLib.
+            // on(tag, std::bind(&ConcreteLib::biz, instance, _1), nullptr, deleter)
+            //   tag     – routing key (c-string, must be in authKeywords_)
+            //   bind    – binds the lib instance as implicit this
             //   nullptr – no pre-filter
-            //   deleter – must be a static class function (e.g. MyLib::deleteOutput)
-            //             or a global function exported from the lib (e.g. mylib_delete).
-            //             Do NOT use outputDeleter() (a virtual instance method);
-            //             the framework stores a raw function pointer with no captured context.
-            for (auto& kv : tagToLib) {
-                IFeatureLib* lib = kv.second;
-                on(kv.first.c_str(),
-                   std::bind(&IFeatureLib::biz, lib, std::placeholders::_1),
-                   nullptr,
-                   lib->outputDeleter());
-                tagLibMap_[kv.first] = lib;
-            }
+            //   deleter – static class function (e.g. ConcreteLib::deleteOutput)
+            //             or global function exported from the lib (e.g. concretelib_delete).
+            //             Do NOT pass outputDeleter() – it is a virtual instance method,
+            //             not a plain function pointer.
+            // Example:
+            //   on("some_tag", std::bind(&ConcreteLib::biz, concreteLib, std::placeholders::_1),
+            //      nullptr, ConcreteLib::deleteOutput);
+            //   tagLibMap_["some_tag"] = concreteLib;
 
             std::sort(authKeywords_.begin(), authKeywords_.end());
 
