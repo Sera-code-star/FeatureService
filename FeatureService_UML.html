@@ -155,10 +155,10 @@ sequenceDiagram
     W->>W: build FeatureOutput{tag, Ok, data}
     W-->>C: cb_(ticket, output*, input*)
     deactivate W
-    C->>FS: deleteOutput(output)
-    C->>FS: deleteInput(input)
     W->>L: taskLib->inject(nullptr)
     W->>W: tasks_.erase(id) / delete Task
+    C->>FS: deleteOutput(output)
+    C->>FS: deleteInput(input)
   </div>
 
   <h2>5. Sequence — Cancel</h2>
@@ -167,6 +167,7 @@ sequenceDiagram
     participant C as Caller
     participant FS as FeatureService
     participant W as WorkerThread
+    participant L as IFeatureLib
 
     C->>FS: cancel(ticket)
     FS->>FS: lock mtx_ / tasks_.find(ticket)
@@ -179,8 +180,9 @@ sequenceDiagram
     else Task currently running
         FS->>W: current_->exitFlag = 1
         W->>W: lib polls exitFlag, aborts early
-        W->>FS: dispatch() detects exitFlag → status=Cancelled, data=null
-        FS-->>C: callback(ticket, Cancelled, input)
+        W->>L: taskLib->inject(nullptr)
+        W->>W: dispatch() detects exitFlag → status=Cancelled, data=null
+        W-->>C: callback(ticket, Cancelled, input)
         W->>W: tasks_.erase(id) / delete Task
     end
   </div>
