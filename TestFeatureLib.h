@@ -17,7 +17,7 @@ namespace feat {
 // what the service passed in.
 class TestFeatureLib : public IFeatureLib {
 public:
-    explicit TestFeatureLib(const std::vector<std::string>& keywords,
+    explicit TestFeatureLib(const vector<string>& keywords,
                             bool failInit = false)
         : keywords_(keywords)
         , failInit_(failInit)
@@ -31,11 +31,11 @@ public:
         return !failInit_;
     }
 
-    std::vector<std::string> getKeywords() const override {
+    vector<string> getKeywords() const override {
         return keywords_;
     }
 
-    void inject(std::atomic<char>* flag) override { (void)flag; }
+    void inject(atomic<char>* flag) override { (void)flag; }
 
     // Returns nullptr by default; tests needing real processing should subclass.
     void* biz(void*) override { return nullptr; }
@@ -48,7 +48,7 @@ public:
     const str_opt& lastOpts() const { return lastOpts_;   }
 
 private:
-    std::vector<std::string> keywords_;
+    vector<string> keywords_;
     bool                     failInit_;
     bool                     initCalled_;
     str_opt           lastOpts_;

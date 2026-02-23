@@ -13,8 +13,33 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <algorithm>
+#include <utility>
+#include <new>
 
 namespace feat {
+
+    using std::string;
+    using std::vector;
+    using std::deque;
+    using std::unordered_map;
+    using std::function;
+    using std::atomic;
+    using std::mutex;
+    using std::lock_guard;
+    using std::unique_lock;
+    using std::condition_variable;
+    using std::thread;
+    using std::uint64_t;
+    using std::move;
+    using std::sort;
+    using std::bind;
+    using std::free;
+    using std::malloc;
+    using std::memcpy;
+    using std::strncpy;
+    using std::nothrow;
+    using std::memory_order_relaxed;
 
     // ---------- Status / ServiceState ----------
     enum class Status : int {
@@ -33,7 +58,7 @@ namespace feat {
     };
 
     // ---------- Ticket ----------
-    typedef std::uint64_t FeatureTicket;
+    typedef uint64_t FeatureTicket;
 
     // ---------- Handler function types ----------
     // biz_func : actual_input* -> actual_output*  (heap-allocated; freed by free_output)
@@ -89,20 +114,20 @@ namespace feat {
                                    void* input);
 
     // ---------- Init Options ----------
-    typedef std::unordered_map<std::string, std::string> str_opt;
+    typedef unordered_map<string, string> str_opt;
 
     // ---------- Lower-lib interface ----------
     class IFeatureLib {
     public:
         virtual ~IFeatureLib() {}
         virtual bool init(const str_opt& opts) = 0;
-        virtual std::vector<std::string> getKeywords() const = 0;
+        virtual vector<string> getKeywords() const = 0;
         // Called by the service just before a task starts.  The lib polls *flag
         // during processing and aborts early if it reads non-zero.
         // Called again with nullptr after the task completes to clear the reference.
-        virtual void inject(std::atomic<char>* flag) = 0;
+        virtual void inject(atomic<char>* flag) = 0;
         // Business function: actual_input* -> heap-allocated actual_output*.
-        // The init lambda binds a specific instance to this via std::bind so that
+        // The init lambda binds a specific instance to this via bind so that
         // each tag's handler entry carries the right this-pointer automatically.
         virtual void* biz(void* input) = 0;
         // C-style deleter for the heap-allocated actual_output* returned by biz().
@@ -114,7 +139,7 @@ namespace feat {
     class IFeatureVerifier {
     public:
         virtual ~IFeatureVerifier() {}
-        virtual bool isAuthorized(const std::vector<std::string>& keywords) const = 0;
+        virtual bool isAuthorized(const vector<string>& keywords) const = 0;
     };
 
     // ---------- Global make / delete helpers ----------
@@ -122,7 +147,7 @@ namespace feat {
     // without holding a reference to the service.
 
     // Step 1 — allocate a malloc'd copy of data[0..size) as the actual typed input struct.
-    // Free with std::free() if not passed to makeInputEvt().
+    // Free with free() if not passed to makeInputEvt().
     void* makeFeatureInput(const void* data, size_t size);
 
     // Step 2 — wrap featureInput* in a submit-ready FeatureInput envelope.
@@ -156,23 +181,23 @@ namespace feat {
         // Per-tag handler record.  Public so deleteInput/deleteOutput can name the type
         // when accessing the static handler table.
         //
-        //   biz_func    — std::function<void*(void*)>; holds either a plain function pointer
-        //                 (external registration) or a std::bind result that carries the lib
+        //   biz_func    — function<void*(void*)>; holds either a plain function pointer
+        //                 (external registration) or a bind result that carries the lib
         //                 instance as its implicit this-pointer (init-lambda registration).
         //   free_input  — c-style deleter for actual_input*; may be nullptr.
         //   free_output — c-style deleter for the void* returned by biz_func; always set for
         //                 lib-bound entries (from IFeatureLib::outputDeleter()).
         struct HandlerEntry {
-            std::function<void*(void*)> biz_func;
+            function<void*(void*)> biz_func;
             FeatureHandlerDel           free_input;
             FeatureHandlerDel           free_output;  // c-style output deleter: void(*)(void*)
         };
 
         // Register a handler for tag. Thread-safe; call before start().
-        //   biz_func accepts any callable convertible to std::function<void*(void*)>,
-        //   including plain function pointers and std::bind expressions.
+        //   biz_func accepts any callable convertible to function<void*(void*)>,
+        //   including plain function pointers and bind expressions.
         void on(const char* tag,
-                std::function<void*(void*)> biz_func,
+                function<void*(void*)> biz_func,
                 FeatureHandlerDel free_input,
                 FeatureHandlerDel free_output);
 
@@ -195,13 +220,13 @@ namespace feat {
         ServiceState state()          const { return state_.load(); }
 
         // Options accessors
-        bool        hasOption(const std::string& key) const;
-        std::string getOption(const std::string& key) const;
-        std::string getOptionOr(const std::string& key, const std::string& fallback) const;
-        bool        getBoolOr(const std::string& key, bool fallback) const;
-        int         getIntOr(const std::string& key, int fallback) const;
-        long long   getLongLongOr(const std::string& key, long long fallback) const;
-        double      getDoubleOr(const std::string& key, double fallback) const;
+        bool        hasOption(const string& key) const;
+        string getOption(const string& key) const;
+        string getOptionOr(const string& key, const string& fallback) const;
+        bool        getBoolOr(const string& key, bool fallback) const;
+        int         getIntOr(const string& key, int fallback) const;
+        long long   getLongLongOr(const string& key, long long fallback) const;
+        double      getDoubleOr(const string& key, double fallback) const;
 
         // Global helpers access the static handler table.
         friend void deleteInput(void* input);
@@ -217,10 +242,10 @@ namespace feat {
         void dispatch(Task* t, const char* tag, Status status, IFeatureLib* taskLib = nullptr);
 
         // Parsing helpers
-        static bool       parseBool(const std::string& s, bool* ok);
-        static int        parseInt(const std::string& s, bool* ok);
-        static long long  parseLongLong(const std::string& s, bool* ok);
-        static double     parseDouble(const std::string& s, bool* ok);
+        static bool       parseBool(const string& s, bool* ok);
+        static int        parseInt(const string& s, bool* ok);
+        static long long  parseLongLong(const string& s, bool* ok);
+        static double     parseDouble(const string& s, bool* ok);
 
         struct Task;
         void workerLoop();
@@ -231,22 +256,22 @@ namespace feat {
         // Shared across all instances; never cleared (handlers are permanent for the
         // lifetime of the service object).
         // Written by on(); read lock-free by dispatch()/submit() after start().
-        static std::unordered_map<std::string, HandlerEntry> handlers_;
-        static std::mutex handlers_mtx_;  // guards concurrent on() calls
+        static unordered_map<string, HandlerEntry> handlers_;
+        static mutex handlers_mtx_;  // guards concurrent on() calls
 
-        std::atomic<ServiceState>                state_;
+        atomic<ServiceState>                state_;
         const str_opt                     opts_;
-        std::unordered_map<std::string, void*>   tagLibMap_;  // tag -> IFeatureLib* (void-erased)
+        unordered_map<string, void*>   tagLibMap_;  // tag -> IFeatureLib* (void-erased)
         IFeatureVerifier*                        verifier_;
-        std::vector<std::string>                 authKeywords_;
+        vector<string>                 authKeywords_;
 
-        std::thread                              worker_;
-        std::deque<Task*>                        queue_;
-        std::unordered_map<FeatureTicket, Task*> tasks_;
-        std::atomic<FeatureTicket>               next_ticket_;
-        mutable std::mutex                       mtx_;
-        std::condition_variable                  cv_;
-        std::atomic<bool>                        stop_flag_;
+        thread                              worker_;
+        deque<Task*>                        queue_;
+        unordered_map<FeatureTicket, Task*> tasks_;
+        atomic<FeatureTicket>               next_ticket_;
+        mutable mutex                       mtx_;
+        condition_variable                  cv_;
+        atomic<bool>                        stop_flag_;
         Task*                                    current_;
     };
 
@@ -258,9 +283,9 @@ namespace feat {
         //                 called as fn(input->data) -> actual_output* in dispatch().
         // Internal tasks: fn = lambda wrapping startup logic;
         //                 called as fn(nullptr), return value ignored.
-        std::function<void*(void*)> fn;
+        function<void*(void*)> fn;
         bool              internal = false;
-        std::atomic<char> exitFlag { 0 };  // cooperative-cancel signal; &exitFlag injected into libs
+        atomic<char> exitFlag { 0 };  // cooperative-cancel signal; &exitFlag injected into libs
     };
 
 } // namespace feat

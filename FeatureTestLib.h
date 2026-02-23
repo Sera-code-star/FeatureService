@@ -36,7 +36,7 @@ struct TestLibOutput {
 // Concrete IFeatureLib that processes TestLibInput → TestLibOutput.
 //
 // biz() doubles input.value, echoes input.label, and polls exitFlag so
-// cancellation works correctly.  outputDeleter() returns std::free so the
+// cancellation works correctly.  outputDeleter() returns free so the
 // service can release the heap-allocated TestLibOutput.
 //
 // Introspection helpers let unit-tests verify service behaviour:
@@ -48,9 +48,9 @@ class FeatureTestLib : public IFeatureLib {
 public:
     // keywords: tags this lib claims; defaults to {"test"}
     // failInit:  if true, init() returns false (simulates broken lib)
-    explicit FeatureTestLib(std::vector<std::string> keywords = {"test"},
+    explicit FeatureTestLib(vector<string> keywords = {"test"},
                             bool failInit = false)
-        : keywords_(std::move(keywords))
+        : keywords_(move(keywords))
         , failInit_(failInit)
         , exitFlag_(nullptr)
         , initCalled_(false)
@@ -65,12 +65,12 @@ public:
         return !failInit_;
     }
 
-    std::vector<std::string> getKeywords() const override {
+    vector<string> getKeywords() const override {
         return keywords_;
     }
 
     // Service calls inject(&task->exitFlag) before biz() and inject(nullptr) after.
-    void inject(std::atomic<char>* flag) override {
+    void inject(atomic<char>* flag) override {
         exitFlag_ = flag;
     }
 
@@ -79,11 +79,11 @@ public:
     void* biz(void* input) override {
         ++bizCallCount_;
 
-        auto* out = static_cast<TestLibOutput*>(std::malloc(sizeof(TestLibOutput)));
+        auto* out = static_cast<TestLibOutput*>(malloc(sizeof(TestLibOutput)));
         if (!out) return nullptr;
 
         // Early cancellation: exitFlag already raised before we start
-        if (exitFlag_ && exitFlag_->load(std::memory_order_relaxed) != 0) {
+        if (exitFlag_ && exitFlag_->load(memory_order_relaxed) != 0) {
             out->result   = 0;
             out->aborted  = true;
             out->label[0] = '\0';
@@ -93,7 +93,7 @@ public:
         auto* in = static_cast<TestLibInput*>(input);
         out->result  = in->value * 2;
         out->aborted = false;
-        std::strncpy(out->label, in->label, sizeof(out->label) - 1);
+        strncpy(out->label, in->label, sizeof(out->label) - 1);
         out->label[sizeof(out->label) - 1] = '\0';
 
         return out;
@@ -101,7 +101,7 @@ public:
 
     // Captureless lambda converts to FeatureHandlerDel (void(*)(void*))
     FeatureHandlerDel outputDeleter() const override {
-        return [](void* p) { std::free(p); };
+        return [](void* p) { free(p); };
     }
 
     // ── Test introspection ───────────────────────────────────────────────────
@@ -110,9 +110,9 @@ public:
     int                   bizCallCount() const { return bizCallCount_; }
 
 private:
-    std::vector<std::string> keywords_;
+    vector<string> keywords_;
     bool                     failInit_;
-    std::atomic<char>*       exitFlag_;    // pointer lent by the service; not owned
+    atomic<char>*       exitFlag_;    // pointer lent by the service; not owned
     bool                     initCalled_;
     int                      bizCallCount_;
     str_opt           lastOpts_;

@@ -8,8 +8,8 @@
 namespace feat {
 
     // ---------- static member definitions ----------
-    std::unordered_map<std::string, FeatureService::HandlerEntry> FeatureService::handlers_;
-    std::mutex FeatureService::handlers_mtx_;
+    unordered_map<string, FeatureService::HandlerEntry> FeatureService::handlers_;
+    mutex FeatureService::handlers_mtx_;
 
     // ---------- deleteInput ----------
     // Global: looks up free_input via the static handler table, calls it on fi->data,
@@ -20,7 +20,7 @@ namespace feat {
         auto it = FeatureService::handlers_.find(fi->tag);
         if (it != FeatureService::handlers_.end() && it->second.free_input && fi->data)
             it->second.free_input(fi->data);
-        std::free(fi);
+        free(fi);
     }
 
     // ---------- deleteOutput ----------
@@ -54,22 +54,22 @@ namespace feat {
 
     // ---------- on ----------
     void FeatureService::on(const char* tag,
-                            std::function<void*(void*)> biz_func,
+                            function<void*(void*)> biz_func,
                             FeatureHandlerDel free_input,
                             FeatureHandlerDel free_output) {
         if (!tag || !biz_func) return;
-        std::lock_guard<std::mutex> lk(handlers_mtx_);
-        handlers_[tag] = { std::move(biz_func), free_input, free_output };
+        lock_guard<mutex> lk(handlers_mtx_);
+        handlers_[tag] = { move(biz_func), free_input, free_output };
     }
 
     // ---------- makeFeatureInput ----------
     // Global: allocates a malloc'd copy of data[0..size). The caller passes this to
-    // makeInputEvt() as the featureInput argument, or frees it with std::free().
+    // makeInputEvt() as the featureInput argument, or frees it with free().
     void* makeFeatureInput(const void* data, size_t size) {
         if (!data || size == 0) return nullptr;
-        void* p = std::malloc(size);
+        void* p = malloc(size);
         if (!p) return nullptr;
-        std::memcpy(p, data, size);
+        memcpy(p, data, size);
         return p;
     }
 
@@ -78,7 +78,7 @@ namespace feat {
     // Tag validation happens in submit() (returns 0 for unregistered tags).
     void* makeInputEvt(const char* tag, void* featureInput) {
         if (!tag) return nullptr;
-        FeatureInput* fi = static_cast<FeatureInput*>(std::malloc(sizeof(FeatureInput)));
+        FeatureInput* fi = static_cast<FeatureInput*>(malloc(sizeof(FeatureInput)));
         if (!fi) return nullptr;
         fi->tag  = tag;
         fi->data = featureInput;
@@ -148,7 +148,7 @@ namespace feat {
         stop_flag_.store(false);
         authKeywords_.clear();
 
-        Task* initTask = new (std::nothrow) Task();
+        Task* initTask = new (nothrow) Task();
         if (!initTask) {
             state_.store(ServiceState::NotRunning);
             return Status::Internal;
@@ -160,7 +160,7 @@ namespace feat {
             // Add one IFeatureLib* per feature domain and increment FEATURE_LIB_COUNT.
             // Example:
             //   IFeatureLib* libs[] = { new ConcreteLib(), new OtherLib() };
-            std::vector<IFeatureLib*> libs = {
+            vector<IFeatureLib*> libs = {
                 /* new ConcreteLib(), */
             };
 
@@ -180,9 +180,9 @@ namespace feat {
 
             // ── Phase 2: collect tags per lib; sets must be disjoint ─────────────
             // tagToLib maps each keyword -> its owning lib; overlap is a config error.
-            std::unordered_map<std::string, IFeatureLib*> tagToLib;
+            unordered_map<string, IFeatureLib*> tagToLib;
             for (size_t i = 0; i < libs.size(); ++i) {
-                std::vector<std::string> kw = libs[i]->getKeywords();
+                vector<string> kw = libs[i]->getKeywords();
                 for (size_t j = 0; j < kw.size(); ++j) {
                     if (tagToLib.count(kw[j])) {
                         ServiceState exp = ServiceState::Initializing;
@@ -215,7 +215,7 @@ namespace feat {
 
             // ── Phase 3: register each tag via on() ──────────────────────────────
             // Hard-code one on() call per tag. Do NOT drive this from tagToLib.
-            // on(tag, std::bind(&ConcreteLib::biz, instance, _1), nullptr, deleter)
+            // on(tag, bind(&ConcreteLib::biz, instance, _1), nullptr, deleter)
             //   tag     – routing key (c-string, must be in authKeywords_)
             //   bind    – binds the lib instance as implicit this
             //   nullptr – no pre-filter
@@ -224,11 +224,11 @@ namespace feat {
             //             Do NOT pass outputDeleter() – it is a virtual instance method,
             //             not a plain function pointer.
             // Example:
-            //   on("some_tag", std::bind(&ConcreteLib::biz, concreteLib, std::placeholders::_1),
+            //   on("some_tag", bind(&ConcreteLib::biz, concreteLib, std::placeholders::_1),
             //      nullptr, ConcreteLib::deleteOutput);
             //   tagLibMap_["some_tag"] = concreteLib;
 
-            std::sort(authKeywords_.begin(), authKeywords_.end());
+            sort(authKeywords_.begin(), authKeywords_.end());
 
             // ── Phase 4: transition to Running ───────────────────────────────────
             ServiceState exp = ServiceState::Initializing;
@@ -241,17 +241,17 @@ namespace feat {
         };
 
         {
-            std::lock_guard<std::mutex> lk(mtx_);
+            lock_guard<mutex> lk(mtx_);
             tasks_.clear();
             current_ = nullptr;
             queue_.push_back(initTask);
         }
 
         try {
-            worker_ = std::thread(&FeatureService::workerLoop, this);
+            worker_ = thread(&FeatureService::workerLoop, this);
         }
         catch (...) {
-            std::lock_guard<std::mutex> lk(mtx_);
+            lock_guard<mutex> lk(mtx_);
             for (Task* qt : queue_) delete qt;
             queue_.clear();
             state_.store(ServiceState::NotRunning);
@@ -281,9 +281,9 @@ namespace feat {
 
         // Collect pending user tasks under the lock, then fire Cancelled callbacks
         // outside it so the client can safely call feat::deleteInput/deleteOutput.
-        std::vector<Task*> pending;
+        vector<Task*> pending;
         {
-            std::lock_guard<std::mutex> lk(mtx_);
+            lock_guard<mutex> lk(mtx_);
             for (Task* t : queue_) {
                 if (t->internal) delete t;
                 else { tasks_.erase(t->id); pending.push_back(t); }
@@ -317,7 +317,7 @@ namespace feat {
         auto it = handlers_.find(fi->tag);
         if (it == handlers_.end()) return 0;
 
-        Task* t = new (std::nothrow) Task();
+        Task* t = new (nothrow) Task();
         if (!t) return 0;
 
         t->id       = next_ticket_.fetch_add(1);
@@ -326,7 +326,7 @@ namespace feat {
         t->internal = false;
 
         {
-            std::lock_guard<std::mutex> lk(mtx_);
+            lock_guard<mutex> lk(mtx_);
             if (stop_flag_.load()) { delete t; return 0; }  // caller still owns fi
             queue_.push_back(t);
             tasks_[t->id] = t;
@@ -340,11 +340,11 @@ namespace feat {
         Task* found = nullptr;
 
         {
-            std::lock_guard<std::mutex> lk(mtx_);
+            lock_guard<mutex> lk(mtx_);
             auto it = tasks_.find(ticket);
             if (it == tasks_.end()) return Status::NotFound;
 
-            for (std::deque<Task*>::iterator qit = queue_.begin(); qit != queue_.end(); ++qit) {
+            for (deque<Task*>::iterator qit = queue_.begin(); qit != queue_.end(); ++qit) {
                 if ((*qit)->id == ticket) {
                     found = *qit;
                     queue_.erase(qit);
@@ -374,7 +374,7 @@ namespace feat {
         for (;;) {
             Task* t = nullptr;
             {
-                std::unique_lock<std::mutex> lk(mtx_);
+                unique_lock<mutex> lk(mtx_);
                 cv_.wait(lk, [this] { return stop_flag_.load() || !queue_.empty(); });
                 if (stop_flag_.load() && queue_.empty()) return;
                 t = queue_.front(); queue_.pop_front();
@@ -397,7 +397,7 @@ namespace feat {
             dispatch(t, nullptr, Status::Ok, taskLib);  // resets inject before cb_ fires
 
             {
-                std::lock_guard<std::mutex> lk(mtx_);
+                lock_guard<mutex> lk(mtx_);
                 if (current_ == t) current_ = nullptr;
                 tasks_.erase(id);
             }
@@ -406,44 +406,44 @@ namespace feat {
     }
 
     // ---------- options ----------
-    bool FeatureService::hasOption(const std::string& key) const {
+    bool FeatureService::hasOption(const string& key) const {
         return opts_.find(key) != opts_.end();
     }
-    std::string FeatureService::getOption(const std::string& key) const {
+    string FeatureService::getOption(const string& key) const {
         auto it = opts_.find(key);
-        if (it == opts_.end()) return std::string();
+        if (it == opts_.end()) return string();
         return it->second;
     }
-    std::string FeatureService::getOptionOr(const std::string& key, const std::string& fallback) const {
+    string FeatureService::getOptionOr(const string& key, const string& fallback) const {
         auto it = opts_.find(key);
         if (it == opts_.end()) return fallback;
         return it->second;
     }
 
-    bool FeatureService::parseBool(const std::string& s, bool* ok) {
-        std::string t; t.reserve(s.size());
+    bool FeatureService::parseBool(const string& s, bool* ok) {
+        string t; t.reserve(s.size());
         for (size_t i = 0; i < s.size(); ++i) { char c = s[i]; if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a'); t.push_back(c); }
         if (t == "1" || t == "true" || t == "yes" || t == "y") { if (ok)*ok = true; return true; }
         if (t == "0" || t == "false" || t == "no" || t == "n") { if (ok)*ok = true; return false; }
         if (ok)*ok = false; return false;
     }
-    int       FeatureService::parseInt(const std::string& s, bool* ok) { char* e = 0; errno = 0; long v = strtol(s.c_str(), &e, 10); if (e == s.c_str() || *e != '\0' || errno == ERANGE || v<INT_MIN || v>INT_MAX) { if (ok)*ok = false; return 0; } if (ok)*ok = true; return (int)v; }
-    long long FeatureService::parseLongLong(const std::string& s, bool* ok) { char* e = 0; errno = 0; long long v = strtoll(s.c_str(), &e, 10); if (e == s.c_str() || *e != '\0' || errno == ERANGE) { if (ok)*ok = false; return 0; } if (ok)*ok = true; return v; }
-    double    FeatureService::parseDouble(const std::string& s, bool* ok) { char* e = 0; errno = 0; double v = strtod(s.c_str(), &e); if (e == s.c_str() || *e != '\0' || errno == ERANGE) { if (ok)*ok = false; return 0.0; } if (ok)*ok = true; return v; }
+    int       FeatureService::parseInt(const string& s, bool* ok) { char* e = 0; errno = 0; long v = strtol(s.c_str(), &e, 10); if (e == s.c_str() || *e != '\0' || errno == ERANGE || v<INT_MIN || v>INT_MAX) { if (ok)*ok = false; return 0; } if (ok)*ok = true; return (int)v; }
+    long long FeatureService::parseLongLong(const string& s, bool* ok) { char* e = 0; errno = 0; long long v = strtoll(s.c_str(), &e, 10); if (e == s.c_str() || *e != '\0' || errno == ERANGE) { if (ok)*ok = false; return 0; } if (ok)*ok = true; return v; }
+    double    FeatureService::parseDouble(const string& s, bool* ok) { char* e = 0; errno = 0; double v = strtod(s.c_str(), &e); if (e == s.c_str() || *e != '\0' || errno == ERANGE) { if (ok)*ok = false; return 0.0; } if (ok)*ok = true; return v; }
 
-    double FeatureService::getDoubleOr(const std::string& key, double fallback) const {
+    double FeatureService::getDoubleOr(const string& key, double fallback) const {
         auto it = opts_.find(key); if (it == opts_.end()) return fallback;
         bool ok = false; double v = parseDouble(it->second, &ok); return ok ? v : fallback;
     }
-    long long FeatureService::getLongLongOr(const std::string& key, long long fallback) const {
+    long long FeatureService::getLongLongOr(const string& key, long long fallback) const {
         auto it = opts_.find(key); if (it == opts_.end()) return fallback;
         bool ok = false; long long v = parseLongLong(it->second, &ok); return ok ? v : fallback;
     }
-    int FeatureService::getIntOr(const std::string& key, int fallback) const {
+    int FeatureService::getIntOr(const string& key, int fallback) const {
         auto it = opts_.find(key); if (it == opts_.end()) return fallback;
         bool ok = false; int v = parseInt(it->second, &ok); return ok ? v : fallback;
     }
-    bool FeatureService::getBoolOr(const std::string& key, bool fallback) const {
+    bool FeatureService::getBoolOr(const string& key, bool fallback) const {
         auto it = opts_.find(key); if (it == opts_.end()) return fallback;
         bool ok = false; bool v = parseBool(it->second, &ok); return ok ? v : fallback;
     }
