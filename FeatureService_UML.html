@@ -152,10 +152,10 @@ sequenceDiagram
     Note over W: dispatch: t->internal==false → fn(input->data) → output*, fires cb_
     W->>L: fn(input->data) [= IFeatureLib::biz]
     L-->>W: actual_output*
+    W->>L: taskLib->inject(nullptr)
     W->>W: build FeatureOutput{tag, Ok, data}
     W-->>C: cb_(ticket, output*, input*)
     deactivate W
-    W->>L: taskLib->inject(nullptr)
     W->>W: tasks_.erase(id) / delete Task
     C->>FS: deleteOutput(output)
     C->>FS: deleteInput(input)

@@ -213,7 +213,8 @@ namespace feat {
         // t!=nullptr → task result:   ticket=t->id, tag from t->input->tag,
         //                             fn called if status==Ok.
         // cb_ is always valid; callback owns output and input; service only deletes Task entities.
-        void dispatch(Task* t, const char* tag, Status status);
+        // taskLib: if non-null, inject(nullptr) is called after fn() returns and before cb_ fires.
+        void dispatch(Task* t, const char* tag, Status status, IFeatureLib* taskLib = nullptr);
 
         // Parsing helpers
         static bool       parseBool(const std::string& s, bool* ok);

@@ -100,7 +100,7 @@ namespace feat {
     //
     // The service only deletes Task entities; deleteInput/deleteOutput look up
     // the static handler table to free input/output data.
-    void FeatureService::dispatch(Task* t, const char* tag, Status status) {
+    void FeatureService::dispatch(Task* t, const char* tag, Status status, IFeatureLib* taskLib) {
         if (t && t->internal) {
             try { t->fn(nullptr); } catch (...) {}
             return;
@@ -113,6 +113,11 @@ namespace feat {
 
         if (t && status == Status::Ok)
             out_data = t->fn(t->input->data);  // actual_input* -> actual_output*
+
+        // Reset lib injection immediately after fn() returns — before the callback
+        // hands output to the caller.  Clears the lib's exitFlag pointer whether the
+        // task completed normally or aborted early via exitFlag.
+        if (taskLib) taskLib->inject(nullptr);
 
         // Option A: if the lib aborted early via exitFlag, override status and discard
         // any partial output so the client sees the same shape as a queued cancel.
@@ -389,9 +394,7 @@ namespace feat {
 
             if (taskLib) taskLib->inject(&t->exitFlag);
 
-            dispatch(t, nullptr, Status::Ok);
-
-            if (taskLib) taskLib->inject(nullptr);   // release pointer before Task is deleted
+            dispatch(t, nullptr, Status::Ok, taskLib);  // resets inject before cb_ fires
 
             {
                 std::lock_guard<std::mutex> lk(mtx_);
