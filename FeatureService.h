@@ -89,13 +89,13 @@ namespace feat {
                                    void* input);
 
     // ---------- Init Options ----------
-    typedef std::unordered_map<std::string, std::string> FeatureOptions;
+    typedef std::unordered_map<std::string, std::string> str_opt;
 
     // ---------- Lower-lib interface ----------
     class IFeatureLib {
     public:
         virtual ~IFeatureLib() {}
-        virtual bool init(const FeatureOptions& opts) = 0;
+        virtual bool init(const str_opt& opts) = 0;
         virtual std::vector<std::string> getKeywords() const = 0;
         // Called by the service just before a task starts.  The lib polls *flag
         // during processing and aborts early if it reads non-zero.
@@ -142,7 +142,7 @@ namespace feat {
     class FeatureService {
     public:
         explicit FeatureService(FeatureCallback cb,
-                                const FeatureOptions& opts = FeatureOptions(),
+                                const str_opt& opts = str_opt(),
                                 IFeatureVerifier* verifier = nullptr);
         ~FeatureService();
 
@@ -235,7 +235,7 @@ namespace feat {
         static std::mutex handlers_mtx_;  // guards concurrent on() calls
 
         std::atomic<ServiceState>                state_;
-        const FeatureOptions                     opts_;
+        const str_opt                     opts_;
         std::unordered_map<std::string, void*>   tagLibMap_;  // tag -> IFeatureLib* (void-erased)
         IFeatureVerifier*                        verifier_;
         std::vector<std::string>                 authKeywords_;

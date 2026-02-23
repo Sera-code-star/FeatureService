@@ -41,7 +41,7 @@ struct TestLibOutput {
 //
 // Introspection helpers let unit-tests verify service behaviour:
 //   lib.initCalled()   – whether the service called init()
-//   lib.lastOpts()     – FeatureOptions the service passed to init()
+//   lib.lastOpts()     – str_opt the service passed to init()
 //   lib.bizCallCount() – number of completed biz() calls
 
 class FeatureTestLib : public IFeatureLib {
@@ -59,7 +59,7 @@ public:
 
     // ── IFeatureLib ──────────────────────────────────────────────────────────
 
-    bool init(const FeatureOptions& opts) override {
+    bool init(const str_opt& opts) override {
         initCalled_ = true;
         lastOpts_   = opts;
         return !failInit_;
@@ -106,7 +106,7 @@ public:
 
     // ── Test introspection ───────────────────────────────────────────────────
     bool                  initCalled()   const { return initCalled_;   }
-    const FeatureOptions& lastOpts()     const { return lastOpts_;     }
+    const str_opt& lastOpts()     const { return lastOpts_;     }
     int                   bizCallCount() const { return bizCallCount_; }
 
 private:
@@ -115,7 +115,7 @@ private:
     std::atomic<char>*       exitFlag_;    // pointer lent by the service; not owned
     bool                     initCalled_;
     int                      bizCallCount_;
-    FeatureOptions           lastOpts_;
+    str_opt           lastOpts_;
 };
 
 } // namespace feat

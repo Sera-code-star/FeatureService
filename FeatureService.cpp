@@ -37,7 +37,7 @@ namespace feat {
 
     // ---------- ctor / dtor ----------
     FeatureService::FeatureService(FeatureCallback cb,
-                                   const FeatureOptions& opts,
+                                   const str_opt& opts,
                                    IFeatureVerifier* verifier)
         : cb_(cb)
         , state_(ServiceState::NotRunning)

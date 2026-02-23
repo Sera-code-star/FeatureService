@@ -25,7 +25,7 @@ public:
     {}
 
     // IFeatureLib
-    bool init(const FeatureOptions& opts) override {
+    bool init(const str_opt& opts) override {
         initCalled_ = true;
         lastOpts_   = opts;
         return !failInit_;
@@ -45,13 +45,13 @@ public:
 
     // Test accessors
     bool                initCalled() const { return initCalled_; }
-    const FeatureOptions& lastOpts() const { return lastOpts_;   }
+    const str_opt& lastOpts() const { return lastOpts_;   }
 
 private:
     std::vector<std::string> keywords_;
     bool                     failInit_;
     bool                     initCalled_;
-    FeatureOptions           lastOpts_;
+    str_opt           lastOpts_;
 };
 
 } // namespace feat
