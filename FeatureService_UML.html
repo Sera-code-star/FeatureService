@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>FeatureService UML Diagrams</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #f5f5f5;
+      padding: 32px;
+      color: #222;
+    }
+    h1 { font-size: 1.6rem; margin-bottom: 8px; }
+    h2 { font-size: 1.2rem; margin-top: 40px; margin-bottom: 8px; border-bottom: 2px solid #ccc; padding-bottom: 4px; }
+    .mermaid {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 24px;
+      margin-top: 12px;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+  <h1>FeatureService — Workflow UML Diagrams</h1>
+
+  <h2>1. Service State Machine</h2>
+  <div class="mermaid">
+stateDiagram-v2
+    [*] --> NotRunning
+    NotRunning --> Initializing : start()
+    Initializing --> Running : Phase 4 success\n→ TAG_START callback
+    Initializing --> NotRunning : lib.init() fail\nor tag conflict\n→ TAG_STOP callback
+    Initializing --> NotRunning : stop_flag_ set\nduring init
+    Running --> NotRunning : stop()\n→ TAG_STOP callback
+  </div>
+
+  <h2>2. Class Diagram</h2>
+  <div class="mermaid">
+classDiagram
+    class FeatureService {
+        -FeatureCallback cb_
+        -ServiceState state_
+        -FeatureOptions opts_
+        -IFeatureVerifier verifier_
+        -deque~Task~ queue_
+        -map~FeatureTicket_Task~ tasks_
+        -atomic~FeatureTicket~ next_ticket_
+        -atomic~bool~ stop_flag_
+        -Task current_
+        +start() Status
+        +stop(join) Status
+        +submit(input) FeatureTicket
+        +cancel(ticket) Status
+        +on(tag, biz_func, free_input, free_output)
+        -dispatch(t, tag, status)
+        -workerLoop()
+    }
+    class Task {
+        +FeatureTicket id
+        +FeatureInput input
+        +function fn
+        +bool internal
+        +atomic~char~ exitFlag
+    }
+    class FeatureInput {
+        +const char tag
+        +void data
+    }
+    class FeatureOutput {
+        +const char tag
+        +Status status
+        +void data
+    }
+    class HandlerEntry {
+        +function biz_func
+        +FeatureHandlerDel free_input
+        +FeatureHandlerDel free_output
+    }
+    class IFeatureLib {
+        &lt;&lt;interface&gt;&gt;
+        +init(opts) bool
+        +getKeywords() vector
+        +inject(flag)
+        +biz(input) void
+        +outputDeleter() FeatureHandlerDel
+    }
+    class IFeatureVerifier {
+        &lt;&lt;interface&gt;&gt;
+        +isAuthorized(keywords) bool
+    }
+    FeatureService --> Task : manages
+    FeatureService --> IFeatureVerifier : uses
+    FeatureService --> IFeatureLib : owns
+    FeatureService --> HandlerEntry : handlers_ static
+    Task --> FeatureInput : holds
+    FeatureService ..> FeatureOutput : creates in dispatch()
+  </div>
+
+  <h2>3. Sequence — Submit &amp; Execute</h2>
+  <div class="mermaid">
+sequenceDiagram
+    participant C as Caller
+    participant FS as FeatureService
+    participant W as WorkerThread
+    participant L as IFeatureLib
+
+    C->>FS: makeFeatureInput(data, size)
+    C->>FS: makeInputEvt(tag, featureInput)
+    C->>FS: submit(input)
+    FS->>FS: check state == Running
+    FS->>FS: handlers_.find(tag) → biz_func
+    FS->>FS: create Task{id, fn, input}
+    FS->>FS: queue_.push_back(t)
+    FS-->>W: cv_.notify_one()
+    FS-->>C: return ticket
+
+    W->>W: cv_.wait → dequeue Task
+    W->>L: taskLib->inject(&exitFlag)
+    Note over W: dispatch(t, nullptr, Ok) runs inside workerLoop
+    activate W
+    W->>L: fn(input->data) [= IFeatureLib::biz]
+    L-->>W: actual_output*
+    W->>W: build FeatureOutput{tag, Ok, data}
+    W-->>C: cb_(ticket, output*, input*)
+    deactivate W
+    C->>FS: deleteOutput(output)
+    C->>FS: deleteInput(input)
+    W->>L: taskLib->inject(nullptr)
+    W->>W: tasks_.erase(id) / delete Task
+  </div>
+
+  <h2>4. Sequence — Cancel</h2>
+  <div class="mermaid">
+sequenceDiagram
+    participant C as Caller
+    participant FS as FeatureService
+    participant W as WorkerThread
+
+    C->>FS: cancel(ticket)
+    FS->>FS: lock mtx_ / tasks_.find(ticket)
+
+    alt Task still in queue
+        FS->>FS: queue_.erase(t) / tasks_.erase(ticket)
+        FS->>FS: dispatch(t, Cancelled)
+        FS-->>C: callback(ticket, Cancelled, input)
+        FS->>FS: delete Task
+    else Task currently running
+        FS->>W: current_->exitFlag = 1
+        W->>W: lib polls exitFlag, aborts early
+        W->>FS: dispatch() detects exitFlag → status=Cancelled, data=null
+        FS-->>C: callback(ticket, Cancelled, input)
+        W->>W: tasks_.erase(id) / delete Task
+    end
+  </div>
+
+  <h2>5. Flowchart — start() Init Sequence</h2>
+  <div class="mermaid">
+flowchart TD
+    A([start]) --> B[CAS state: NotRunning → Initializing]
+    B --> C{CAS success?}
+    C -- No --> Z([return Ok / already active])
+    C -- Yes --> D[create internal initTask\npush to queue_\nspawn workerLoop thread]
+    D --> E[Worker picks up initTask]
+
+    E --> F[Phase 1: lib.init for each lib]
+    F --> G{init ok?}
+    G -- No --> H[state = NotRunning\ndispatch TAG_STOP]
+    H --> ZZ([return])
+
+    G -- Yes --> I[Phase 2: lib.getKeywords\nbuild authKeywords_]
+    I --> J{tag overlap?}
+    J -- Yes --> H
+
+    J -- No --> V{verifier authorized?}
+    V -- No --> H
+    V -- Yes --> K{stop_flag_ set?}
+    K -- Yes --> L[authKeywords_.clear]
+    L --> ZZ
+
+    K -- No --> M[Phase 3: on tag / biz_func / deleter\ntagLibMap_ = lib\nsort authKeywords_]
+    M --> N[Phase 4: CAS state: Initializing → Running]
+    N --> O[dispatch TAG_START callback]
+    O --> P([Worker enters normal task loop])
+  </div>
+
+  <script>
+    mermaid.initialize({ startOnLoad: true, theme: 'default' });
+  </script>
+</body>
+</html>
