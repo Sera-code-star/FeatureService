@@ -195,6 +195,19 @@ namespace feat {
 
             if (stop_flag_.load()) { authKeywords_.clear(); return nullptr; }
 
+            // ── Phase 2b: authorization check ─────────────────────────────────────
+            // verifier runs here, in the worker thread, after authKeywords_ is fully
+            // built.  If denied the service fails to start, same shape as init() fail.
+            if (verifier_ && !verifier_->isAuthorized(authKeywords_)) {
+                ServiceState exp = ServiceState::Initializing;
+                if (state_.compare_exchange_strong(exp, ServiceState::NotRunning)) {
+                    authKeywords_.clear();
+                    dispatch(nullptr, TAG_STOP, Status::Ok);
+                    stop_flag_.store(true);
+                }
+                return nullptr;
+            }
+
             // ── Phase 3: register each tag via on() ──────────────────────────────
             // Hard-code one on() call per tag. Do NOT drive this from tagToLib.
             // on(tag, std::bind(&ConcreteLib::biz, instance, _1), nullptr, deleter)
@@ -294,7 +307,6 @@ namespace feat {
         FeatureInput* fi = static_cast<FeatureInput*>(input);
         if (!fi->tag) return 0;
         if (state_.load() != ServiceState::Running) return 0;
-        if (verifier_ && !verifier_->isAuthorized(authKeywords_)) return 0;
 
         // Resolve biz_func from handlers_ (read-only after start(); no lock needed).
         auto it = handlers_.find(fi->tag);

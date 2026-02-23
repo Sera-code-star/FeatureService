@@ -111,7 +111,6 @@ sequenceDiagram
     C->>FS: makeInputEvt(tag, featureInput)
     C->>FS: submit(input)
     FS->>FS: check state == Running
-    FS->>FS: verifier.isAuthorized(authKeywords_)
     FS->>FS: handlers_.find(tag) → biz_func
     FS->>FS: create Task{id, fn, input}
     FS->>FS: queue_.push_back(t)
@@ -175,7 +174,9 @@ flowchart TD
     I --> J{tag overlap?}
     J -- Yes --> H
 
-    J -- No --> K{stop_flag_ set?}
+    J -- No --> V{verifier authorized?}
+    V -- No --> H
+    V -- Yes --> K{stop_flag_ set?}
     K -- Yes --> L[authKeywords_.clear]
     L --> ZZ
 
