@@ -8,444 +8,444 @@
 namespace feat {
 
     // ---------- static member definitions ----------
-    unordered_map<string, FeatureService::HandlerEntry> FeatureService::handlers_;
-    mutex FeatureService::handlers_mtx_;
+    unordered_map<string, FeatureService::HandlerEntry> FeatureService::_Handlers;
+    mutex FeatureService::_HandlersMtx;
 
-    // ---------- deleteInput ----------
-    // Global: looks up free_input via the static handler table, calls it on fi->data,
-    // then frees the envelope.  No-op data-free if tag is absent (lifecycle events).
-    void deleteInput(void* p) {
-        FeatureInput* fi = static_cast<FeatureInput*>(p);
-        if (!fi) return;
-        auto it = FeatureService::handlers_.find(fi->tag);
-        if (it != FeatureService::handlers_.end() && it->second.free_input && fi->data)
-            it->second.free_input(fi->data);
-        free(fi);
+    // ---------- DeleteInput ----------
+    // Global: looks up FreeInput via the static handler table, calls it on Fi->Data,
+    // then frees the envelope.  No-op data-free if Tag is absent (lifecycle events).
+    void DeleteInput(void* P) {
+        FeatureInput* Fi = static_cast<FeatureInput*>(P);
+        if (!Fi) return;
+        auto It = FeatureService::_Handlers.find(Fi->Tag);
+        if (It != FeatureService::_Handlers.end() && It->second.FreeInput && Fi->Data)
+            It->second.FreeInput(Fi->Data);
+        free(Fi);
     }
 
-    // ---------- deleteOutput ----------
-    // Global: looks up free_output via the static handler table, calls it on fo->data,
-    // then deletes the envelope.  No-op data-free for lifecycle outputs (tag absent).
-    void deleteOutput(void* p) {
-        FeatureOutput* fo = static_cast<FeatureOutput*>(p);
-        if (!fo) return;
-        auto it = FeatureService::handlers_.find(fo->tag);
-        if (it != FeatureService::handlers_.end() && it->second.free_output && fo->data)
-            it->second.free_output(fo->data);
-        delete fo;
+    // ---------- DeleteOutput ----------
+    // Global: looks up FreeOutput via the static handler table, calls it on Fo->Data,
+    // then deletes the envelope.  No-op data-free for lifecycle outputs (Tag absent).
+    void DeleteOutput(void* P) {
+        FeatureOutput* Fo = static_cast<FeatureOutput*>(P);
+        if (!Fo) return;
+        auto It = FeatureService::_Handlers.find(Fo->Tag);
+        if (It != FeatureService::_Handlers.end() && It->second.FreeOutput && Fo->Data)
+            It->second.FreeOutput(Fo->Data);
+        delete Fo;
     }
 
     // ---------- ctor / dtor ----------
-    FeatureService::FeatureService(FeatureCallback cb,
-                                   const str_opt& opts,
-                                   IFeatureVerifier* verifier)
-        : cb_(cb)
-        , state_(ServiceState::NotRunning)
-        , opts_(opts)
-        , verifier_(verifier)
-        , next_ticket_(1)
-        , stop_flag_(false)
-        , current_(nullptr)
+    FeatureService::FeatureService(FeatureCallback Cb,
+                                   const str_opt& Opts,
+                                   IFeatureVerifier* Verifier)
+        : _Cb(Cb)
+        , _State(ServiceState::NotRunning)
+        , _Opts(Opts)
+        , _Verifier(Verifier)
+        , _NextTicket(1)
+        , _StopFlag(false)
+        , _Current(nullptr)
     {}
 
     FeatureService::~FeatureService() {
-        stop(true);
+        Stop(true);
     }
 
-    // ---------- on ----------
-    void FeatureService::on(const char* tag,
-                            function<void*(void*)> biz_func,
-                            FeatureHandlerDel free_input,
-                            FeatureHandlerDel free_output) {
-        if (!tag || !biz_func) return;
-        lock_guard<mutex> lk(handlers_mtx_);
-        handlers_[tag] = { move(biz_func), free_input, free_output };
+    // ---------- On ----------
+    void FeatureService::On(const char* Tag,
+                            function<void*(void*)> BizFunc,
+                            FeatureHandlerDel FreeInput,
+                            FeatureHandlerDel FreeOutput) {
+        if (!Tag || !BizFunc) return;
+        lock_guard<mutex> Lk(_HandlersMtx);
+        _Handlers[Tag] = { move(BizFunc), FreeInput, FreeOutput };
     }
 
-    // ---------- makeFeatureInput ----------
-    // Global: allocates a malloc'd copy of data[0..size). The caller passes this to
-    // makeInputEvt() as the featureInput argument, or frees it with free().
-    void* makeFeatureInput(const void* data, size_t size) {
-        if (!data || size == 0) return nullptr;
-        void* p = malloc(size);
-        if (!p) return nullptr;
-        memcpy(p, data, size);
-        return p;
+    // ---------- MakeFeatureInput ----------
+    // Global: allocates a malloc'd copy of Data[0..Size). The caller passes this to
+    // MakeInputEvt() as the InputPtr argument, or frees it with free().
+    void* MakeFeatureInput(const void* Data, size_t Size) {
+        if (!Data || Size == 0) return nullptr;
+        void* P = malloc(Size);
+        if (!P) return nullptr;
+        memcpy(P, Data, Size);
+        return P;
     }
 
-    // ---------- makeInputEvt ----------
-    // Global: wraps featureInput* + tag in a malloc'd FeatureInput envelope for submit().
-    // Tag validation happens in submit() (returns 0 for unregistered tags).
-    void* makeInputEvt(const char* tag, void* featureInput) {
-        if (!tag) return nullptr;
-        FeatureInput* fi = static_cast<FeatureInput*>(malloc(sizeof(FeatureInput)));
-        if (!fi) return nullptr;
-        fi->tag  = tag;
-        fi->data = featureInput;
-        return static_cast<void*>(fi);
+    // ---------- MakeInputEvt ----------
+    // Global: wraps InputPtr + Tag in a malloc'd FeatureInput envelope for Submit().
+    // Tag validation happens in Submit() (returns 0 for unregistered tags).
+    void* MakeInputEvt(const char* Tag, void* InputPtr) {
+        if (!Tag) return nullptr;
+        FeatureInput* Fi = static_cast<FeatureInput*>(malloc(sizeof(FeatureInput)));
+        if (!Fi) return nullptr;
+        Fi->Tag  = Tag;
+        Fi->Data = InputPtr;
+        return static_cast<void*>(Fi);
     }
 
-    // ---------- dispatch ----------
+    // ---------- Dispatch ----------
     // Unified output-build and callback-fire for both service events and task results.
     //
-    // Service event (t == nullptr):
-    //   ticket=0, tag=tag, status=Ok, data=null, input=null.
+    // Service event (T == nullptr):
+    //   Ticket=0, Tag=Tag, Status=Ok, Data=null, Input=null.
     //
-    // Internal task (t->internal == true):
-    //   Calls t->fn(nullptr); no user callback fired.
+    // Internal task (T->Internal == true):
+    //   Calls T->Fn(nullptr); no user callback fired.
     //
-    // User task (t->internal == false):
-    //   ticket=t->id, tag=t->input->tag; calls t->fn(input->data) if status==Ok.
-    //   Does NOT delete t — caller (service) does.
+    // User task (T->Internal == false):
+    //   Ticket=T->Id, Tag=T->Input->Tag; calls T->Fn(Input->Data) if Stat==Ok.
+    //   Does NOT delete T — caller (service) does.
     //
-    // The service only deletes Task entities; deleteInput/deleteOutput look up
+    // The service only deletes Task entities; DeleteInput/DeleteOutput look up
     // the static handler table to free input/output data.
-    void FeatureService::dispatch(Task* t, const char* tag, Status status, IFeatureLib* taskLib) {
-        if (t && t->internal) {
-            try { t->fn(nullptr); } catch (...) {}
+    void FeatureService::Dispatch(Task* T, const char* Tag, Status Stat, IFeatureLib* TaskLib) {
+        if (T && T->Internal) {
+            try { T->Fn(nullptr); } catch (...) {}
             return;
         }
 
-        FeatureTicket ticket  = t ? t->id         : 0;
-        const char*   out_tag = t ? t->input->tag : tag;
-        void*         input   = t ? static_cast<void*>(t->input) : nullptr;
-        void*         out_data = nullptr;
+        FeatureTicket Ticket  = T ? T->Id         : 0;
+        const char*   OutTag  = T ? T->Input->Tag : Tag;
+        void*         Input   = T ? static_cast<void*>(T->Input) : nullptr;
+        void*         OutData = nullptr;
 
-        if (t && status == Status::Ok)
-            out_data = t->fn(t->input->data);  // actual_input* -> actual_output*
+        if (T && Stat == Status::Ok)
+            OutData = T->Fn(T->Input->Data);  // actual_input* -> actual_output*
 
-        // Reset lib injection immediately after fn() returns — before the callback
-        // hands output to the caller.  Clears the lib's exitFlag pointer whether the
-        // task completed normally or aborted early via exitFlag.
-        if (taskLib) taskLib->inject(nullptr);
+        // Reset lib injection immediately after Fn() returns — before the callback
+        // hands output to the caller.  Clears the lib's ExitFlag pointer whether the
+        // task completed normally or aborted early via ExitFlag.
+        if (TaskLib) TaskLib->Inject(nullptr);
 
-        // Option A: if the lib aborted early via exitFlag, override status and discard
+        // Option A: if the lib aborted early via ExitFlag, override Stat and discard
         // any partial output so the client sees the same shape as a queued cancel.
-        if (t && t->exitFlag.load()) {
-            status   = Status::Cancelled;
-            out_data = nullptr;
+        if (T && T->ExitFlag.load()) {
+            Stat    = Status::Cancelled;
+            OutData = nullptr;
         }
 
-        FeatureOutput* out = new FeatureOutput();
-        out->tag    = out_tag;
-        out->status = status;
-        out->data   = out_data;
+        FeatureOutput* Out = new FeatureOutput();
+        Out->Tag    = OutTag;
+        Out->Status = Stat;
+        Out->Data   = OutData;
 
-        cb_(ticket, static_cast<void*>(out), input);
+        _Cb(Ticket, static_cast<void*>(Out), Input);
     }
 
-    // ---------- start ----------
+    // ---------- Start ----------
     // Total number of hard-coded IFeatureLib instances the service owns.
     // Increment this and add the matching instance construction inside the
     // init lambda below whenever a new feature library is integrated.
-#define FEATURE_LIB_COUNT 0
+#define FeatureLibCount 0
 
-    Status FeatureService::start() {
-        ServiceState expected = ServiceState::NotRunning;
-        if (!state_.compare_exchange_strong(expected, ServiceState::Initializing))
+    Status FeatureService::Start() {
+        ServiceState Expected = ServiceState::NotRunning;
+        if (!_State.compare_exchange_strong(Expected, ServiceState::Initializing))
             return Status::Ok;  // already Initializing or Running
 
-        stop_flag_.store(false);
-        authKeywords_.clear();
+        _StopFlag.store(false);
+        _AuthKeywords.clear();
 
-        Task* initTask = new (nothrow) Task();
-        if (!initTask) {
-            state_.store(ServiceState::NotRunning);
+        Task* InitTask = new (nothrow) Task();
+        if (!InitTask) {
+            _State.store(ServiceState::NotRunning);
             return Status::Internal;
         }
-        initTask->id       = 0;
-        initTask->internal = true;
-        initTask->fn = [this](void*) -> void* {
-            // ── Hard-coded lib instances (FEATURE_LIB_COUNT above) ───────────────
-            // Add one IFeatureLib* per feature domain and increment FEATURE_LIB_COUNT.
+        InitTask->Id       = 0;
+        InitTask->Internal = true;
+        InitTask->Fn = [this](void*) -> void* {
+            // ── Hard-coded lib instances (FeatureLibCount above) ─────────────────
+            // Add one IFeatureLib* per feature domain and increment FeatureLibCount.
             // Example:
-            //   IFeatureLib* libs[] = { new ConcreteLib(), new OtherLib() };
-            vector<IFeatureLib*> libs = {
+            //   IFeatureLib* Libs[] = { new ConcreteLib(), new OtherLib() };
+            vector<IFeatureLib*> Libs = {
                 /* new ConcreteLib(), */
             };
 
-            // ── Phase 1: init each lib instance ──────────────────────────────────
-            for (size_t i = 0; i < libs.size(); ++i) {
-                if (stop_flag_.load()) { authKeywords_.clear(); return nullptr; }
-                if (!libs[i]->init(opts_)) {
-                    ServiceState exp = ServiceState::Initializing;
-                    if (state_.compare_exchange_strong(exp, ServiceState::NotRunning)) {
-                        authKeywords_.clear();
-                        dispatch(nullptr, TAG_STOP, Status::Ok);
-                        stop_flag_.store(true);
+            // ── Phase 1: Init each lib instance ──────────────────────────────────
+            for (size_t I = 0; I < Libs.size(); ++I) {
+                if (_StopFlag.load()) { _AuthKeywords.clear(); return nullptr; }
+                if (!Libs[I]->Init(_Opts)) {
+                    ServiceState Exp = ServiceState::Initializing;
+                    if (_State.compare_exchange_strong(Exp, ServiceState::NotRunning)) {
+                        _AuthKeywords.clear();
+                        Dispatch(nullptr, TagStop, Status::Ok);
+                        _StopFlag.store(true);
                     }
                     return nullptr;
                 }
             }
 
             // ── Phase 2: collect tags per lib; sets must be disjoint ─────────────
-            // tagToLib maps each keyword -> its owning lib; overlap is a config error.
-            unordered_map<string, IFeatureLib*> tagToLib;
-            for (size_t i = 0; i < libs.size(); ++i) {
-                vector<string> kw = libs[i]->getKeywords();
-                for (size_t j = 0; j < kw.size(); ++j) {
-                    if (tagToLib.count(kw[j])) {
-                        ServiceState exp = ServiceState::Initializing;
-                        if (state_.compare_exchange_strong(exp, ServiceState::NotRunning)) {
-                            authKeywords_.clear();
-                            dispatch(nullptr, TAG_STOP, Status::Ok);
-                            stop_flag_.store(true);
+            // TagToLib maps each keyword -> its owning lib; overlap is a config error.
+            unordered_map<string, IFeatureLib*> TagToLib;
+            for (size_t I = 0; I < Libs.size(); ++I) {
+                vector<string> Kw = Libs[I]->GetKeywords();
+                for (size_t J = 0; J < Kw.size(); ++J) {
+                    if (TagToLib.count(Kw[J])) {
+                        ServiceState Exp = ServiceState::Initializing;
+                        if (_State.compare_exchange_strong(Exp, ServiceState::NotRunning)) {
+                            _AuthKeywords.clear();
+                            Dispatch(nullptr, TagStop, Status::Ok);
+                            _StopFlag.store(true);
                         }
                         return nullptr;
                     }
-                    tagToLib[kw[j]] = libs[i];
-                    authKeywords_.push_back(kw[j]);
+                    TagToLib[Kw[J]] = Libs[I];
+                    _AuthKeywords.push_back(Kw[J]);
                 }
             }
 
-            if (stop_flag_.load()) { authKeywords_.clear(); return nullptr; }
+            if (_StopFlag.load()) { _AuthKeywords.clear(); return nullptr; }
 
             // ── Phase 2b: authorization check ─────────────────────────────────────
-            // verifier runs here, in the worker thread, after authKeywords_ is fully
-            // built.  If denied the service fails to start, same shape as init() fail.
-            if (verifier_ && !verifier_->isAuthorized(authKeywords_)) {
-                ServiceState exp = ServiceState::Initializing;
-                if (state_.compare_exchange_strong(exp, ServiceState::NotRunning)) {
-                    authKeywords_.clear();
-                    dispatch(nullptr, TAG_STOP, Status::Ok);
-                    stop_flag_.store(true);
+            // Verifier runs here, in the worker thread, after _AuthKeywords is fully
+            // built.  If denied the service fails to Start, same shape as Init() fail.
+            if (_Verifier && !_Verifier->IsAuthorized(_AuthKeywords)) {
+                ServiceState Exp = ServiceState::Initializing;
+                if (_State.compare_exchange_strong(Exp, ServiceState::NotRunning)) {
+                    _AuthKeywords.clear();
+                    Dispatch(nullptr, TagStop, Status::Ok);
+                    _StopFlag.store(true);
                 }
                 return nullptr;
             }
 
-            // ── Phase 3: register each tag via on() ──────────────────────────────
-            // Hard-code one on() call per tag. Do NOT drive this from tagToLib.
-            // on(tag, bind(&ConcreteLib::biz, instance, _1), nullptr, deleter)
-            //   tag     – routing key (c-string, must be in authKeywords_)
+            // ── Phase 3: register each tag via On() ──────────────────────────────
+            // Hard-code one On() call per tag. Do NOT drive this from TagToLib.
+            // On(Tag, bind(&ConcreteLib::Biz, Instance, _1), nullptr, Deleter)
+            //   Tag     – routing key (c-string, must be in _AuthKeywords)
             //   bind    – binds the lib instance as implicit this
             //   nullptr – no pre-filter
-            //   deleter – static class function (e.g. ConcreteLib::deleteOutput)
+            //   Deleter – static class function (e.g. ConcreteLib::DeleteOutput)
             //             or global function exported from the lib (e.g. concretelib_delete).
-            //             Do NOT pass outputDeleter() – it is a virtual instance method,
+            //             Do NOT pass OutputDeleter() – it is a virtual instance method,
             //             not a plain function pointer.
             // Example:
-            //   on("some_tag", bind(&ConcreteLib::biz, concreteLib, std::placeholders::_1),
-            //      nullptr, ConcreteLib::deleteOutput);
-            //   tagLibMap_["some_tag"] = concreteLib;
+            //   On("some_tag", bind(&ConcreteLib::Biz, ConcreteLib, std::placeholders::_1),
+            //      nullptr, ConcreteLib::DeleteOutput);
+            //   _TagLibMap["some_tag"] = ConcreteLib;
 
-            sort(authKeywords_.begin(), authKeywords_.end());
+            sort(_AuthKeywords.begin(), _AuthKeywords.end());
 
             // ── Phase 4: transition to Running ───────────────────────────────────
-            ServiceState exp = ServiceState::Initializing;
-            if (!state_.compare_exchange_strong(exp, ServiceState::Running)) {
-                authKeywords_.clear();
+            ServiceState Exp = ServiceState::Initializing;
+            if (!_State.compare_exchange_strong(Exp, ServiceState::Running)) {
+                _AuthKeywords.clear();
                 return nullptr;
             }
-            dispatch(nullptr, TAG_START, Status::Ok);
+            Dispatch(nullptr, TagStart, Status::Ok);
             return nullptr;
         };
 
         {
-            lock_guard<mutex> lk(mtx_);
-            tasks_.clear();
-            current_ = nullptr;
-            queue_.push_back(initTask);
+            lock_guard<mutex> Lk(_Mtx);
+            _Tasks.clear();
+            _Current = nullptr;
+            _Queue.push_back(InitTask);
         }
 
         try {
-            worker_ = thread(&FeatureService::workerLoop, this);
+            _Worker = thread(&FeatureService::WorkerLoop, this);
         }
         catch (...) {
-            lock_guard<mutex> lk(mtx_);
-            for (Task* qt : queue_) delete qt;
-            queue_.clear();
-            state_.store(ServiceState::NotRunning);
+            lock_guard<mutex> Lk(_Mtx);
+            for (Task* Qt : _Queue) delete Qt;
+            _Queue.clear();
+            _State.store(ServiceState::NotRunning);
             return Status::Internal;
         }
 
         return Status::Ok;
     }
 
-    // ---------- stop ----------
-    Status FeatureService::stop(bool join) {
-        ServiceState old = state_.load();
-        bool wasActive = false;
+    // ---------- Stop ----------
+    Status FeatureService::Stop(bool Join) {
+        ServiceState Old = _State.load();
+        bool WasActive = false;
         for (;;) {
-            if (old == ServiceState::NotRunning) break;
-            if (state_.compare_exchange_weak(old, ServiceState::NotRunning)) {
-                wasActive = true; break;
+            if (Old == ServiceState::NotRunning) break;
+            if (_State.compare_exchange_weak(Old, ServiceState::NotRunning)) {
+                WasActive = true; break;
             }
         }
 
-        stop_flag_.store(true);
-        cv_.notify_all();
+        _StopFlag.store(true);
+        _Cv.notify_all();
 
-        if (join && worker_.joinable()) worker_.join();
+        if (Join && _Worker.joinable()) _Worker.join();
 
-        if (!wasActive) return Status::Ok;
+        if (!WasActive) return Status::Ok;
 
         // Collect pending user tasks under the lock, then fire Cancelled callbacks
-        // outside it so the client can safely call feat::deleteInput/deleteOutput.
-        vector<Task*> pending;
+        // outside it so the client can safely call feat::DeleteInput/DeleteOutput.
+        vector<Task*> Pending;
         {
-            lock_guard<mutex> lk(mtx_);
-            for (Task* t : queue_) {
-                if (t->internal) delete t;
-                else { tasks_.erase(t->id); pending.push_back(t); }
+            lock_guard<mutex> Lk(_Mtx);
+            for (Task* T : _Queue) {
+                if (T->Internal) delete T;
+                else { _Tasks.erase(T->Id); Pending.push_back(T); }
             }
-            queue_.clear();
-            current_ = nullptr;
+            _Queue.clear();
+            _Current = nullptr;
         }
-        for (Task* t : pending) {
-            dispatch(t, nullptr, Status::Cancelled);  // fires callback; client gets input back
-            delete t;
+        for (Task* T : Pending) {
+            Dispatch(T, nullptr, Status::Cancelled);  // fires callback; client gets input back
+            delete T;
         }
-        authKeywords_.clear();
+        _AuthKeywords.clear();
 
-        if (!join) dispatch(nullptr, TAG_STOP, Status::Ok);
+        if (!Join) Dispatch(nullptr, TagStop, Status::Ok);
 
         return Status::Ok;
     }
 
-    // ---------- submit ----------
-    // Looks up fn (biz_func) for fi->tag at enqueue time; stores the whole FeatureInput*
-    // in the Task (service does NOT free it).  The worker calls fn(fi->data) via dispatch()
-    // and then fires the callback with both output and the original input.
-    // On failure (returns 0): input is NOT consumed; caller must call feat::deleteInput(p).
-    FeatureTicket FeatureService::submit(void* input) {
-        if (!input) return 0;
-        FeatureInput* fi = static_cast<FeatureInput*>(input);
-        if (!fi->tag) return 0;
-        if (state_.load() != ServiceState::Running) return 0;
+    // ---------- Submit ----------
+    // Looks up Fn (BizFunc) for Fi->Tag at enqueue time; stores the whole FeatureInput*
+    // in the Task (service does NOT free it).  The worker calls Fn(Fi->Data) via Dispatch()
+    // and then fires the callback with both output and the original Input.
+    // On failure (returns 0): Input is NOT consumed; caller must call feat::DeleteInput(P).
+    FeatureTicket FeatureService::Submit(void* Input) {
+        if (!Input) return 0;
+        FeatureInput* Fi = static_cast<FeatureInput*>(Input);
+        if (!Fi->Tag) return 0;
+        if (_State.load() != ServiceState::Running) return 0;
 
-        // Resolve biz_func from handlers_ (read-only after start(); no lock needed).
-        auto it = handlers_.find(fi->tag);
-        if (it == handlers_.end()) return 0;
+        // Resolve BizFunc from _Handlers (read-only after Start(); no lock needed).
+        auto It = _Handlers.find(Fi->Tag);
+        if (It == _Handlers.end()) return 0;
 
-        Task* t = new (nothrow) Task();
-        if (!t) return 0;
+        Task* T = new (nothrow) Task();
+        if (!T) return 0;
 
-        t->id       = next_ticket_.fetch_add(1);
-        t->input    = fi;                   // whole envelope; service holds until callback
-        t->fn       = it->second.biz_func;
-        t->internal = false;
+        T->Id       = _NextTicket.fetch_add(1);
+        T->Input    = Fi;                   // whole envelope; service holds until callback
+        T->Fn       = It->second.BizFunc;
+        T->Internal = false;
 
         {
-            lock_guard<mutex> lk(mtx_);
-            if (stop_flag_.load()) { delete t; return 0; }  // caller still owns fi
-            queue_.push_back(t);
-            tasks_[t->id] = t;
+            lock_guard<mutex> Lk(_Mtx);
+            if (_StopFlag.load()) { delete T; return 0; }  // caller still owns Fi
+            _Queue.push_back(T);
+            _Tasks[T->Id] = T;
         }
-        cv_.notify_one();
-        return t->id;
+        _Cv.notify_one();
+        return T->Id;
     }
 
-    // ---------- cancel ----------
-    Status FeatureService::cancel(FeatureTicket ticket) {
-        Task* found = nullptr;
+    // ---------- Cancel ----------
+    Status FeatureService::Cancel(FeatureTicket Ticket) {
+        Task* Found = nullptr;
 
         {
-            lock_guard<mutex> lk(mtx_);
-            auto it = tasks_.find(ticket);
-            if (it == tasks_.end()) return Status::NotFound;
+            lock_guard<mutex> Lk(_Mtx);
+            auto It = _Tasks.find(Ticket);
+            if (It == _Tasks.end()) return Status::NotFound;
 
-            for (deque<Task*>::iterator qit = queue_.begin(); qit != queue_.end(); ++qit) {
-                if ((*qit)->id == ticket) {
-                    found = *qit;
-                    queue_.erase(qit);
-                    tasks_.erase(ticket);
+            for (deque<Task*>::iterator Qit = _Queue.begin(); Qit != _Queue.end(); ++Qit) {
+                if ((*Qit)->Id == Ticket) {
+                    Found = *Qit;
+                    _Queue.erase(Qit);
+                    _Tasks.erase(Ticket);
                     break;
                 }
             }
 
             // Not in queue: currently running — signal it to abort cooperatively.
-            if (!found) {
-                if (current_ != it->second) return Status::NotFound;
-                current_->exitFlag.store(1);  // lib polls this; dispatch() fires Cancelled cb
-                // tasks_ entry left intact; workerLoop erases it after dispatch() returns.
+            if (!Found) {
+                if (_Current != It->second) return Status::NotFound;
+                _Current->ExitFlag.store(1);  // lib polls this; Dispatch() fires Cancelled cb
+                // _Tasks entry left intact; WorkerLoop erases it after Dispatch() returns.
             }
         }
 
-        if (found) {
-            // Fire Cancelled callback; client receives original input back and frees it.
-            dispatch(found, nullptr, Status::Cancelled);
-            delete found;
+        if (Found) {
+            // Fire Cancelled callback; client receives original Input back and frees it.
+            Dispatch(Found, nullptr, Status::Cancelled);
+            delete Found;
         }
         return Status::Ok;
     }
 
-    // ---------- workerLoop ----------
-    void FeatureService::workerLoop() {
+    // ---------- WorkerLoop ----------
+    void FeatureService::WorkerLoop() {
         for (;;) {
-            Task* t = nullptr;
+            Task* T = nullptr;
             {
-                unique_lock<mutex> lk(mtx_);
-                cv_.wait(lk, [this] { return stop_flag_.load() || !queue_.empty(); });
-                if (stop_flag_.load() && queue_.empty()) return;
-                t = queue_.front(); queue_.pop_front();
-                if (!t->internal) current_ = t;
+                unique_lock<mutex> Lk(_Mtx);
+                _Cv.wait(Lk, [this] { return _StopFlag.load() || !_Queue.empty(); });
+                if (_StopFlag.load() && _Queue.empty()) return;
+                T = _Queue.front(); _Queue.pop_front();
+                if (!T->Internal) _Current = T;
             }
 
-            FeatureTicket id = t->id;
+            FeatureTicket Id = T->Id;
 
-            // Resolve which lib handles this task's tag before dispatch() clears t->input.
-            // Falls back to nullptr (no injection) if the tag has no registered lib.
-            IFeatureLib* taskLib = nullptr;
-            if (!t->internal) {
-                auto it = tagLibMap_.find(t->input->tag);
-                if (it != tagLibMap_.end())
-                    taskLib = static_cast<IFeatureLib*>(it->second);
+            // Resolve which lib handles this task's Tag before Dispatch() clears T->Input.
+            // Falls back to nullptr (no injection) if the Tag has no registered lib.
+            IFeatureLib* TaskLib = nullptr;
+            if (!T->Internal) {
+                auto It = _TagLibMap.find(T->Input->Tag);
+                if (It != _TagLibMap.end())
+                    TaskLib = static_cast<IFeatureLib*>(It->second);
             }
 
-            if (taskLib) taskLib->inject(&t->exitFlag);
+            if (TaskLib) TaskLib->Inject(&T->ExitFlag);
 
-            dispatch(t, nullptr, Status::Ok, taskLib);  // resets inject before cb_ fires
+            Dispatch(T, nullptr, Status::Ok, TaskLib);  // resets Inject before _Cb fires
 
             {
-                lock_guard<mutex> lk(mtx_);
-                if (current_ == t) current_ = nullptr;
-                tasks_.erase(id);
+                lock_guard<mutex> Lk(_Mtx);
+                if (_Current == T) _Current = nullptr;
+                _Tasks.erase(Id);
             }
-            delete t;
+            delete T;
         }
     }
 
     // ---------- options ----------
-    bool FeatureService::hasOption(const string& key) const {
-        return opts_.find(key) != opts_.end();
+    bool FeatureService::HasOption(const string& Key) const {
+        return _Opts.find(Key) != _Opts.end();
     }
-    string FeatureService::getOption(const string& key) const {
-        auto it = opts_.find(key);
-        if (it == opts_.end()) return string();
-        return it->second;
+    string FeatureService::GetOption(const string& Key) const {
+        auto It = _Opts.find(Key);
+        if (It == _Opts.end()) return string();
+        return It->second;
     }
-    string FeatureService::getOptionOr(const string& key, const string& fallback) const {
-        auto it = opts_.find(key);
-        if (it == opts_.end()) return fallback;
-        return it->second;
+    string FeatureService::GetOptionOr(const string& Key, const string& Fallback) const {
+        auto It = _Opts.find(Key);
+        if (It == _Opts.end()) return Fallback;
+        return It->second;
     }
 
-    bool FeatureService::parseBool(const string& s, bool* ok) {
-        string t; t.reserve(s.size());
-        for (size_t i = 0; i < s.size(); ++i) { char c = s[i]; if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a'); t.push_back(c); }
-        if (t == "1" || t == "true" || t == "yes" || t == "y") { if (ok)*ok = true; return true; }
-        if (t == "0" || t == "false" || t == "no" || t == "n") { if (ok)*ok = true; return false; }
-        if (ok)*ok = false; return false;
+    bool FeatureService::ParseBool(const string& S, bool* Ok) {
+        string T; T.reserve(S.size());
+        for (size_t I = 0; I < S.size(); ++I) { char C = S[I]; if (C >= 'A' && C <= 'Z') C = char(C - 'A' + 'a'); T.push_back(C); }
+        if (T == "1" || T == "true" || T == "yes" || T == "y") { if (Ok)*Ok = true; return true; }
+        if (T == "0" || T == "false" || T == "no" || T == "n") { if (Ok)*Ok = true; return false; }
+        if (Ok)*Ok = false; return false;
     }
-    int       FeatureService::parseInt(const string& s, bool* ok) { char* e = 0; errno = 0; long v = strtol(s.c_str(), &e, 10); if (e == s.c_str() || *e != '\0' || errno == ERANGE || v<INT_MIN || v>INT_MAX) { if (ok)*ok = false; return 0; } if (ok)*ok = true; return (int)v; }
-    long long FeatureService::parseLongLong(const string& s, bool* ok) { char* e = 0; errno = 0; long long v = strtoll(s.c_str(), &e, 10); if (e == s.c_str() || *e != '\0' || errno == ERANGE) { if (ok)*ok = false; return 0; } if (ok)*ok = true; return v; }
-    double    FeatureService::parseDouble(const string& s, bool* ok) { char* e = 0; errno = 0; double v = strtod(s.c_str(), &e); if (e == s.c_str() || *e != '\0' || errno == ERANGE) { if (ok)*ok = false; return 0.0; } if (ok)*ok = true; return v; }
+    int       FeatureService::ParseInt(const string& S, bool* Ok) { char* E = 0; errno = 0; long V = strtol(S.c_str(), &E, 10); if (E == S.c_str() || *E != '\0' || errno == ERANGE || V<INT_MIN || V>INT_MAX) { if (Ok)*Ok = false; return 0; } if (Ok)*Ok = true; return (int)V; }
+    long long FeatureService::ParseLongLong(const string& S, bool* Ok) { char* E = 0; errno = 0; long long V = strtoll(S.c_str(), &E, 10); if (E == S.c_str() || *E != '\0' || errno == ERANGE) { if (Ok)*Ok = false; return 0; } if (Ok)*Ok = true; return V; }
+    double    FeatureService::ParseDouble(const string& S, bool* Ok) { char* E = 0; errno = 0; double V = strtod(S.c_str(), &E); if (E == S.c_str() || *E != '\0' || errno == ERANGE) { if (Ok)*Ok = false; return 0.0; } if (Ok)*Ok = true; return V; }
 
-    double FeatureService::getDoubleOr(const string& key, double fallback) const {
-        auto it = opts_.find(key); if (it == opts_.end()) return fallback;
-        bool ok = false; double v = parseDouble(it->second, &ok); return ok ? v : fallback;
+    double FeatureService::GetDoubleOr(const string& Key, double Fallback) const {
+        auto It = _Opts.find(Key); if (It == _Opts.end()) return Fallback;
+        bool Ok = false; double V = ParseDouble(It->second, &Ok); return Ok ? V : Fallback;
     }
-    long long FeatureService::getLongLongOr(const string& key, long long fallback) const {
-        auto it = opts_.find(key); if (it == opts_.end()) return fallback;
-        bool ok = false; long long v = parseLongLong(it->second, &ok); return ok ? v : fallback;
+    long long FeatureService::GetLongLongOr(const string& Key, long long Fallback) const {
+        auto It = _Opts.find(Key); if (It == _Opts.end()) return Fallback;
+        bool Ok = false; long long V = ParseLongLong(It->second, &Ok); return Ok ? V : Fallback;
     }
-    int FeatureService::getIntOr(const string& key, int fallback) const {
-        auto it = opts_.find(key); if (it == opts_.end()) return fallback;
-        bool ok = false; int v = parseInt(it->second, &ok); return ok ? v : fallback;
+    int FeatureService::GetIntOr(const string& Key, int Fallback) const {
+        auto It = _Opts.find(Key); if (It == _Opts.end()) return Fallback;
+        bool Ok = false; int V = ParseInt(It->second, &Ok); return Ok ? V : Fallback;
     }
-    bool FeatureService::getBoolOr(const string& key, bool fallback) const {
-        auto it = opts_.find(key); if (it == opts_.end()) return fallback;
-        bool ok = false; bool v = parseBool(it->second, &ok); return ok ? v : fallback;
+    bool FeatureService::GetBoolOr(const string& Key, bool Fallback) const {
+        auto It = _Opts.find(Key); if (It == _Opts.end()) return Fallback;
+        bool Ok = false; bool V = ParseBool(It->second, &Ok); return Ok ? V : Fallback;
     }
 
 } // namespace feat
