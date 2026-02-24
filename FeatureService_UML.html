@@ -99,7 +99,35 @@ classDiagram
     FeatureService ..> FeatureOutput : creates in dispatch()
   </div>
 
-  <h2>3. Sequence — Submit &amp; Execute</h2>
+  <h2>3. Sequence — start() / Init Task</h2>
+  <div class="mermaid">
+sequenceDiagram
+    participant C as Caller
+    participant FS as FeatureService
+    participant W as WorkerThread
+
+    C->>FS: start()
+    FS->>FS: CAS state: NotRunning → Initializing
+    FS->>FS: create initTask{id=0, internal=true, fn=initLambda}
+    FS->>FS: queue_.push_back(initTask)
+    FS-->>W: spawn workerLoop thread
+    FS-->>C: return Ok
+
+    Note over W: dequeue initTask — internal=true
+    Note over W: current_ NOT set → not cancellable
+    activate W
+    Note over W: dispatch: t->internal==true → fn(nullptr), no user callback from task dispatch
+    W->>W: Phase 1 — lib.init(opts_)
+    W->>W: Phase 2 — lib.getKeywords() → build authKeywords_
+    W->>W: Phase 2b — verifier.isAuthorized(authKeywords_)
+    W->>W: Phase 3 — on(tag, bind(&Lib::biz, lib, _1), nullptr, deleter)
+    W->>W: Phase 4 — CAS Initializing → Running
+    W-->>C: dispatch(nullptr, TAG_START) → cb_(0, TAG_START output*, null)
+    deactivate W
+    W->>W: delete initTask → worker enters user-task loop
+  </div>
+
+  <h2>4. Sequence — Submit &amp; Execute</h2>
   <div class="mermaid">
 sequenceDiagram
     participant C as Caller
@@ -112,32 +140,34 @@ sequenceDiagram
     C->>FS: submit(input)
     FS->>FS: check state == Running
     FS->>FS: handlers_.find(tag) → biz_func
-    FS->>FS: create Task{id, fn, input}
-    FS->>FS: queue_.push_back(t)
+    FS->>FS: create Task{id, internal=false, fn=biz_func, input}
+    FS->>FS: queue_.push_back(t) / tasks_[id]=t
     FS-->>W: cv_.notify_one()
     FS-->>C: return ticket
 
-    W->>W: cv_.wait → dequeue Task
+    Note over W: dequeue user task — internal=false
+    Note over W: current_ = t → cancellable via exitFlag
     W->>L: taskLib->inject(&exitFlag)
-    Note over W: dispatch(t, nullptr, Ok) runs inside workerLoop
     activate W
+    Note over W: dispatch: t->internal==false → fn(input->data) → output*, fires cb_
     W->>L: fn(input->data) [= IFeatureLib::biz]
     L-->>W: actual_output*
+    W->>L: taskLib->inject(nullptr)
     W->>W: build FeatureOutput{tag, Ok, data}
     W-->>C: cb_(ticket, output*, input*)
     deactivate W
+    W->>W: tasks_.erase(id) / delete Task
     C->>FS: deleteOutput(output)
     C->>FS: deleteInput(input)
-    W->>L: taskLib->inject(nullptr)
-    W->>W: tasks_.erase(id) / delete Task
   </div>
 
-  <h2>4. Sequence — Cancel</h2>
+  <h2>5. Sequence — Cancel</h2>
   <div class="mermaid">
 sequenceDiagram
     participant C as Caller
     participant FS as FeatureService
     participant W as WorkerThread
+    participant L as IFeatureLib
 
     C->>FS: cancel(ticket)
     FS->>FS: lock mtx_ / tasks_.find(ticket)
@@ -150,13 +180,14 @@ sequenceDiagram
     else Task currently running
         FS->>W: current_->exitFlag = 1
         W->>W: lib polls exitFlag, aborts early
-        W->>FS: dispatch() detects exitFlag → status=Cancelled, data=null
-        FS-->>C: callback(ticket, Cancelled, input)
+        W->>L: taskLib->inject(nullptr)
+        W->>W: dispatch() detects exitFlag → status=Cancelled, data=null
+        W-->>C: callback(ticket, Cancelled, input)
         W->>W: tasks_.erase(id) / delete Task
     end
   </div>
 
-  <h2>5. Flowchart — start() Init Sequence</h2>
+  <h2>6. Flowchart — start() Init Sequence</h2>
   <div class="mermaid">
 flowchart TD
     A([start]) --> B[CAS state: NotRunning → Initializing]
