@@ -32,6 +32,7 @@ namespace feat {
     using std::thread;
     using std::uint64_t;
     using std::move;
+    using std::set;
     using std::sort;
     using std::bind;
     using std::free;
@@ -139,7 +140,7 @@ namespace feat {
     class IFeatureVerifier {
     public:
         virtual ~IFeatureVerifier() {}
-        virtual bool IsAuthorized(const vector<string>& Keywords) const = 0;
+        virtual bool IsAuthorized(const set<string>& Keywords) const = 0;
     };
 
     // ---------- Global make / delete helpers ----------
@@ -263,7 +264,7 @@ namespace feat {
         const str_opt                       _Opts;
         unordered_map<string, void*>        _TagLibMap;  // tag -> IFeatureLib* (void-erased)
         IFeatureVerifier*                   _Verifier;
-        vector<string>                      _AuthKeywords;
+        set<string>                         _AuthKeywords;
 
         thread                              _Worker;
         deque<Task*>                        _Queue;

@@ -194,7 +194,7 @@ namespace feat {
                         return nullptr;
                     }
                     TagToLib[Kw[J]] = Libs[I];
-                    _AuthKeywords.push_back(Kw[J]);
+                    _AuthKeywords.insert(Kw[J]);
                 }
             }
 
@@ -227,8 +227,6 @@ namespace feat {
             //   On("some_tag", bind(&ConcreteLib::Biz, ConcreteLib, std::placeholders::_1),
             //      nullptr, ConcreteLib::DeleteOutput);
             //   _TagLibMap["some_tag"] = ConcreteLib;
-
-            sort(_AuthKeywords.begin(), _AuthKeywords.end());
 
             // ── Phase 4: transition to Running ───────────────────────────────────
             ServiceState Exp = ServiceState::Initializing;
